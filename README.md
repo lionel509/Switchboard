@@ -169,11 +169,44 @@ the catalog stays available to Auto whether it is listed or not — Qwen, Grok a
 routable while not taking up a row.
 
 > [!note]
-> **There is no arrow-key variant switch.** The `←/→ to adjust` on the effort line is Claude
-> Code's own UI; a gateway model is `{id, display_name}` in a cache file and cannot hook key
-> events or carry variants behind a row. Family rows are the closest available thing: one row,
-> and the tier chosen per task rather than by keypress. To force one exact variant, launch with
-> `--model deepseek/deepseek-v4-pro`.
+> **There is no arrow-key variant switch.** The binary has keybindings
+> `modelPicker:decreaseEffort` and `modelPicker:increaseEffort` and no variant equivalent — the
+> `←/→` axis is the effort slider and nothing else. Effort cannot be repurposed either:
+> `CLAUDE_EFFORT` at low, high and xhigh all send an identical body
+> (`thinking.budget_tokens: 31999`), so there is no signal for the router to read. The picker
+> does have a search, so a long menu stays navigable.
+
+### Replacing the whole menu (better than family rows)
+
+Family rows work around the ten-row limit by collapsing variants. But the limit only bites
+because six Claude rows are fixed — and they need not be. Claude Code has a `modelPicker`
+setting, whose schema the binary gives as:
+
+```
+an object with an "options" array of { model, label?, description? } rows
+```
+
+With `replaceBuiltInOptions: true` the lineup **is** the menu, so dropping Claude rows you never
+use buys room for every gateway variant as its own selectable row:
+
+```sh
+python3 switchboard.py apply            # write the lineup
+python3 switchboard.py apply --revert   # restore the built-in menu
+```
+
+```
+ 1. Opus (1M)        4. DeepSeek Flash    7. Google Gemini Pro
+ 2. Sonnet           5. DeepSeek Pro      8. Kimi K3
+ 3. Haiku            6. Google Gemini Flash   9. Auto
+```
+
+Nine rows, no overflow, every variant directly selectable. Edit `claude_rows` and `apply_models`
+in `models.json` to change the lineup; anything omitted is still routable by Auto. The previous
+settings are copied to `settings.json.bak` first.
+
+`replaceBuiltInOptions` hides gateway-discovered rows, so with a lineup applied the `sync` cache
+no longer drives the menu — the lineup does. Verified that Claude Code starts clean with gateway
+ids in it.
 
 ### Specialties
 
