@@ -10,7 +10,7 @@
     "grok": "xAI Grok",
     "glm": "Z.ai GLM"
   },
-  "_picker_note": "Gateway rows are published after the six built-in Claude rows and the custom arrow row, so roughly the first three land above the fold and the rest sit past '… +N models'. That overflow IS the second page: the picker scrolls, and it has a search, so anything down there is still one keystroke away. Order this list by how often each is picked by hand — Auto is always first.",
+  "_picker_note": "Gateway rows are published after the six built-in Claude rows. Order this list by how often each is picked by hand — Auto is always first. openrouter/auto is deliberately NOT listed: it is a delegation target for Auto (rule 4), not a hand-pick. Picking it directly can never select a subscription model, so every turn costs cash — the inverse of what Auto is for. Launch with --model openrouter/auto if it is ever wanted explicitly.",
   "picker": {
     "families": [],
     "models": [
@@ -21,8 +21,7 @@
       "deepseek/deepseek-v4-pro",
       "~google/gemini-pro-latest",
       "~z-ai/glm-latest",
-      "moonshotai/kimi-k3",
-      "openrouter/auto"
+      "moonshotai/kimi-k3"
     ]
   },
   "_claude_rows_note": "Used only by 'picker --apply'. These are the built-in Claude rows worth keeping when the lineup is replaced; drop or reorder freely. Aliases work ('sonnet', 'opus[1m]').",
