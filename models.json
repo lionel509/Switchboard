@@ -12,14 +12,8 @@
   },
   "_picker_note": "Two ways to shorten the /model menu. (1) 'picker' below drives gateway discovery: family rows collapse variants and pick a tier per task. (2) 'switchboard.py picker --apply' writes a modelPicker lineup into ~/.claude/settings.json with replaceBuiltInOptions, which replaces the WHOLE menu — so you can drop Claude rows you never use and list every variant explicitly instead. Either way, Auto still routes across the full 'models' list. The menu shows 10 rows before collapsing the rest behind '… +N models'.",
   "picker": {
-    "families": [
-      "deepseek",
-      "gemini"
-    ],
-    "models": [
-      "moonshotai/kimi-k3",
-      "openrouter/auto"
-    ]
+    "families": [],
+    "models": []
   },
   "_claude_rows_note": "Used only by 'picker --apply'. These are the built-in Claude rows worth keeping when the lineup is replaced; drop or reorder freely. Aliases work ('sonnet', 'opus[1m]').",
   "claude_rows": [
@@ -40,14 +34,7 @@
     }
   ],
   "_apply_models_note": "Used only by 'picker --apply': the exact gateway variants to list as their own rows. Anything omitted is still routable by Auto.",
-  "apply_models": [
-    "~deepseek/deepseek-v4-flash-latest",
-    "deepseek/deepseek-v4-pro",
-    "~google/gemini-flash-latest",
-    "~google/gemini-pro-latest",
-    "moonshotai/kimi-k3",
-    "openrouter/auto"
-  ],
+  "apply_models": [],
   "models": [
     {
       "id": "claude-haiku-4-5-20251001",
@@ -205,5 +192,13 @@
       "good_at": "ANY paid work with no specialist need. Delegates the choice: OpenRouter classifies the prompt into a task type and ranks models by community spend over 7 days, so it tracks the field without this catalog being maintained. Prefer it over naming a specific priced model unless that model has a SPECIALTY the task needs.",
       "source": "openrouter.ai auto router; ranks by trailing-7-day community task spend"
     }
-  ]
+  ],
+  "_arrow_note": "The ←/→ row. Claude Code's effort slider reaches the wire as output_config.effort, and a row declared via ANTHROPIC_CUSTOM_MODEL_OPTION with SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort gets that slider even as a gateway id. So one picker row carries this shortlist and the arrows choose between them. Ordered weakest to strongest; an unmapped level falls to the strongest set.",
+  "arrow_models": {
+    "low": "~z-ai/glm-latest",
+    "medium": "deepseek/deepseek-v4-pro",
+    "high": "~google/gemini-pro-latest",
+    "xhigh": "moonshotai/kimi-k3",
+    "max": "openrouter/auto"
+  }
 }

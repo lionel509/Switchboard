@@ -73,6 +73,12 @@ PORTABLE = {"model", "messages", "system", "max_tokens", "metadata",
             "stop_sequences", "stream", "temperature", "top_k", "top_p",
             "tools", "tool_choice"}
 
+# Reasoning budget handed to OpenRouter models, in output tokens. These are run
+# at their strongest rather than sliding with the effort setting, because on this
+# setup the ←/→ slider is spent selecting the model instead (see ARROW_MODEL).
+# Thinking tokens bill as output tokens, so this is a real cost lever.
+THINKING_BUDGET = int(os.environ.get("CLAUDE_ROUTER_THINKING", "12000"))
+
 
 def sanitize(body):
     """Drop Anthropic-only fields, and cache_control markers, for other models."""
@@ -94,6 +100,17 @@ def sanitize(body):
                 strip_cc(v)
 
     strip_cc(req)
+
+    # Restore reasoning. `thinking` is dropped above as an Anthropic-only field,
+    # but OpenRouter honours exactly that one — measured on deepseek-v4-pro:
+    # no field at all gives thinking_tokens=0, {"reasoning": {"effort": "high"}}
+    # also gives 0 (silently ignored), and an explicit budget gives 222. So
+    # without this these models run with NO reasoning whatsoever.
+    # Anthropic requires 1024 <= budget_tokens < max_tokens.
+    mt = req.get("max_tokens") or 0
+    budget = min(THINKING_BUDGET, mt - 1024)
+    if budget >= 1024:
+        req["thinking"] = {"type": "enabled", "budget_tokens": budget}
     return json.dumps(req).encode()
 
 
@@ -345,6 +362,21 @@ def resolve_auto(req):
     return chosen
 
 
+# --- Arrow-key model selection ---------------------------------------------
+# The picker's ←/→ adjuster is the effort slider, and effort reaches the wire as
+# output_config.effort ("low".."max"). A row declared with
+# ANTHROPIC_CUSTOM_MODEL_OPTION_SUPPORTED_CAPABILITIES="effort,xhigh_effort,max_effort"
+# gets that adjuster even though it is a gateway id — verified: selecting
+# ~pick/openrouter sends output_config {"effort": "low"} / {"effort": "xhigh"}.
+#
+# So one picker row can carry a whole shortlist, with ←/→ choosing between them.
+# Effort is spent as the selector rather than as effort, which is the right trade
+# here: these models are always run at their highest reasoning anyway (see
+# REASONING_EFFORT below), so there is nothing left for the slider to mean.
+ARROW_MODEL = "~pick/openrouter"
+ARROW_MAP   = CATALOG.get("arrow_models", {})
+ARROW_ORDER = ["low", "medium", "high", "xhigh", "max"]
+
 FAMILY_PREFIX = "~fam/"
 FAMILY_LABELS = CATALOG.get("family_labels", {})
 PICKER         = CATALOG.get("picker", {})
@@ -376,6 +408,24 @@ def resolve_family(req, fam):
     with _auto_lock:
         _auto_pins[key] = chosen
     return chosen
+
+
+def resolve_arrow(req):
+    """Map the picker's effort level onto a model. This is the arrow-key row.
+
+    No conversation pin: the whole point is that ←/→ switches the model mid
+    session, so the effort on each request is the live answer.
+    """
+    eff = (req.get("output_config") or {}).get("effort")
+    chosen = ARROW_MAP.get(eff)
+    if chosen:
+        return chosen
+    # Effort absent or unmapped: fall to the highest level that is configured,
+    # since the shortlist is ordered weakest-to-strongest.
+    for lvl in reversed(ARROW_ORDER):
+        if ARROW_MAP.get(lvl):
+            return ARROW_MAP[lvl]
+    return FALLBACK
 
 
 def picker_rows():
@@ -459,6 +509,8 @@ class Router(BaseHTTPRequestHandler):
                 model = requested = req.get("model", "") or ""
                 if requested == AUTO_MODEL:
                     model = resolve_auto(req)
+                elif requested == ARROW_MODEL:
+                    model = resolve_arrow(req)
                 elif requested.startswith(FAMILY_PREFIX):
                     model = resolve_family(req, requested[len(FAMILY_PREFIX):])
                 if model != requested:
