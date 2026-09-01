@@ -1,0 +1,82 @@
+{
+  "_comment": "Edit with switchboard.py (add/remove/list), or by hand. Prices are USD per 1M tokens, in/out, recorded when the entry was added — they drift, so treat them as ordering, not billing. 'good_at' is fed verbatim to the router model when Auto picks.",
+
+  "router_model": "~deepseek/deepseek-v4-flash-latest",
+  "fallback": "claude-sonnet-5",
+
+  "models": [
+    {
+      "id": "~deepseek/deepseek-v4-flash-latest",
+      "name": "DeepSeek Flash",
+      "family": "deepseek",
+      "tier": "flash",
+      "price": [0.05, 0.16],
+      "context": 1310720,
+      "good_at": "bulk mechanical work at the lowest price available - renames, greps, reformatting, straightforward edits. 1M context."
+    },
+    {
+      "id": "deepseek/deepseek-v4-pro",
+      "name": "DeepSeek Pro",
+      "family": "deepseek",
+      "tier": "pro",
+      "price": [1.6, 3.2],
+      "context": 1048576,
+      "good_at": "hard reasoning and multi-step code work at mid price. Strong on maths and algorithms."
+    },
+    {
+      "id": "~google/gemini-flash-latest",
+      "name": "Google Gemini Flash",
+      "family": "gemini",
+      "tier": "flash",
+      "price": [0.75, 3.75],
+      "context": 1048576,
+      "good_at": "fast general work, summarising, multimodal input. A safe cheap default when unsure."
+    },
+    {
+      "id": "~google/gemini-pro-latest",
+      "name": "Google Gemini Pro",
+      "family": "gemini",
+      "tier": "pro",
+      "price": [2.0, 12.0],
+      "context": 1048576,
+      "good_at": "long documents, large codebases, careful analysis over very large context."
+    },
+    {
+      "id": "qwen/qwen3.8-flash",
+      "name": "Qwen Flash",
+      "family": "qwen",
+      "tier": "flash",
+      "price": [0.15, 0.47],
+      "context": 1000000,
+      "zdr": false,
+      "good_at": "cheap agentic and coding work, visual understanding, long video and document analysis."
+    },
+    {
+      "id": "~x-ai/grok-latest",
+      "name": "xAI Grok",
+      "family": "grok",
+      "tier": "pro",
+      "price": [2.0, 6.0],
+      "context": 2000000,
+      "good_at": "current events, informal reasoning, code review with opinions."
+    },
+    {
+      "id": "~z-ai/glm-latest",
+      "name": "Z.ai GLM",
+      "family": "glm",
+      "tier": "pro",
+      "price": [1.17, 3.96],
+      "context": 200000,
+      "good_at": "agentic tool use and coding at mid price."
+    },
+    {
+      "id": "~moonshotai/kimi-latest",
+      "name": "MoonshotAI Kimi",
+      "family": "kimi",
+      "tier": "pro",
+      "price": [2.55, 12.75],
+      "context": 256000,
+      "good_at": "long-context reading and writing, research summarisation."
+    }
+  ]
+}

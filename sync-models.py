@@ -27,7 +27,29 @@ BASE = os.environ.get("ANTHROPIC_BASE_URL", "http://127.0.0.1:8787").rstrip("/")
 CACHE = os.path.expanduser("~/.claude/cache/gateway-models.json")
 
 
+CATALOG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")
+
+
 def fetch():
+    """Prefer models.json — it needs no network and works before the router has
+    been restarted onto a new catalog. Fall back to asking a running router."""
+    try:
+        with open(CATALOG) as f:
+            cat = json.load(f)
+        out = []
+        for m in cat.get("models", []):
+            if not m.get("id"):
+                continue
+            label = m.get("name") or m["id"]
+            if m.get("zdr", True) is False:
+                label += " (no ZDR)"
+            out.append({"id": m["id"], "display_name": label})
+        if out:
+            out.append({"id": "~auto/auto", "display_name": "Auto — routed per task"})
+            return out
+    except Exception:
+        pass
+
     req = urllib.request.Request(BASE + "/v1/models",
                                  headers={"anthropic-version": "2023-06-01"})
     with urllib.request.urlopen(req, timeout=30) as r:

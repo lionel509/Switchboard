@@ -18,23 +18,47 @@ LOGFILE  = os.path.expanduser(os.environ.get(
 # substrings of OpenRouter model ids to surface in /model
 SURFACE  = [s for s in os.environ.get("CLAUDE_ROUTER_MODELS", "grok").split(",") if s]
 
+# --- Catalog ---------------------------------------------------------------
+# models.json is the source of truth for what appears in /model and what Auto
+# may choose from. Edit it with switchboard.py. If it is missing we fall back to
+# the old CLAUDE_ROUTER_MODELS substring behaviour so nothing breaks.
+CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")
+
+
+def load_catalog():
+    try:
+        with open(CATALOG_PATH) as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+
+CATALOG      = load_catalog()
+CANDIDATES   = [m for m in CATALOG.get("models", []) if m.get("id")]
+BY_ID        = {m["id"]: m for m in CANDIDATES}
+
 # --- Auto ------------------------------------------------------------------
-# A pseudo-model in the picker. Pick it for a session of mundane work and cheap
-# turns go to a cheap provider, protecting Claude quota; anything that looks
-# like real work escalates and stays escalated.
+# A pseudo-model in the picker. Rather than defaulting to something cheap, Auto
+# spends one call on a *cheap router model* that reads the task and names the
+# model best suited to it.
 #
-# The decision is made ONCE PER CONVERSATION, not per request, and is one-way.
-# Reason: Claude Code's system prompt + tool schemas is 10-25k tokens, and
-# prompt caching makes turn 2+ nearly free. Every provider switch is a full
-# cache miss at full input price, so a per-request router loses money on cache
-# misses faster than it saves it on cheap tokens.
-AUTO_MODEL  = "~auto/auto"
-AUTO_CHEAP  = os.environ.get("CLAUDE_ROUTER_AUTO_CHEAP", "~google/gemini-flash-latest")
-# Escalation target defaults to Anthropic: on a subscription it is free at the
-# margin, so there is no reason to pay OpenRouter for the hard turns.
-AUTO_STRONG = os.environ.get("CLAUDE_ROUTER_AUTO_STRONG", "claude-sonnet-5")
+# The decision is made ONCE PER CONVERSATION, not per request, and escalation is
+# one-way. Reason: Claude Code's system prompt + tool schemas is 10-25k tokens,
+# and prompt caching makes turn 2+ nearly free (a real turn here logged
+# cache_read=71346). Every provider switch is a full cache miss at full input
+# price, so a per-request router loses more on cache misses than it saves.
+AUTO_MODEL   = "~auto/auto"
+ROUTER_MODEL = os.environ.get("CLAUDE_ROUTER_AUTO_ROUTER",
+                              CATALOG.get("router_model", ""))
+# Used when the router model is unavailable, returns nonsense, or a session
+# escalates. Defaults to Anthropic: free at the margin on a subscription.
+FALLBACK     = os.environ.get("CLAUDE_ROUTER_AUTO_FALLBACK",
+                              CATALOG.get("fallback", "claude-sonnet-5"))
 # Escalate above this many characters of serialised prompt (~4 chars/token).
 AUTO_ESCALATE_CHARS = int(os.environ.get("CLAUDE_ROUTER_AUTO_CHARS", "24000"))
+# Only this much of the task is shown to the router model — it needs the gist,
+# and this is a third party that does not need the whole conversation.
+AUTO_TASK_CHARS = 2000
 
 _auto_pins = {}                 # conversation key -> resolved model id
 _auto_lock = threading.Lock()
@@ -117,10 +141,21 @@ def read_usage(payload):
 
 
 def prefs_for(model):
-    for frag, prefs in PROVIDER_PREFS.items():
+    prefs = None
+    for frag, p in PROVIDER_PREFS.items():
         if frag in (model or "").lower():
-            return prefs
-    return DEFAULT_PREFS
+            prefs = dict(p)
+            break
+    if prefs is None:
+        prefs = dict(DEFAULT_PREFS)
+    # A model whose catalog entry says zdr:false has NO zero-data-retention
+    # provider. Asking for one returns no candidates and the request just fails,
+    # so for those the choice is to send it or not to use the model at all.
+    # The picker labels them "(no ZDR)" so the trade is made knowingly.
+    entry = BY_ID.get(model or "")
+    if entry is not None and entry.get("zdr", True) is False:
+        prefs.pop("zdr", None)
+    return prefs
 
 
 def conv_key(req):
@@ -139,10 +174,11 @@ def conv_key(req):
 
 
 def looks_hard(req):
-    """Escalation signals available in the request itself. No classifier model.
+    """Escalation signals from the request itself — the safety net, not the picker.
 
-    Deliberately not 'is this question difficult' — that is unknowable from the
-    first message. These are proxies for *the session has become real work*.
+    Deliberately not 'is this question difficult'; that is what the router model
+    is for. These only catch a session that has *become* real work after the
+    routing decision was already made.
     """
     if len(req.get("tools") or []) > 3:
         return "tools"
@@ -153,15 +189,94 @@ def looks_hard(req):
     return None
 
 
+def task_text(req):
+    """The last user message, flattened to text and truncated."""
+    for m in reversed(req.get("messages") or []):
+        if m.get("role") != "user":
+            continue
+        c = m.get("content")
+        if isinstance(c, str):
+            return c[:AUTO_TASK_CHARS]
+        if isinstance(c, list):
+            parts = [b.get("text", "") for b in c if isinstance(b, dict)]
+            return " ".join(p for p in parts if p)[:AUTO_TASK_CHARS]
+    return ""
+
+
+ROUTER_PROMPT = """You pick which model should handle a task. Reply with ONE model id \
+from the list and nothing else.
+
+Models:
+%s
+
+Prefer the cheapest model whose description covers the task. Choose an expensive \
+model only when the task plainly needs stronger reasoning, very long context, or \
+careful code work.
+
+Task:
+%s
+
+Model id:"""
+
+
+def ask_router_model(task):
+    """One cheap call to name the best model for this task. None on any failure."""
+    if not ROUTER_MODEL or not CANDIDATES or not task:
+        return None
+    key = or_key()
+    if not key:
+        return None
+    listing = "\n".join(
+        "%s | $%s/$%s per 1M | %s" % (m["id"], m.get("price", ["?", "?"])[0],
+                                      m.get("price", ["?", "?"])[1], m.get("good_at", ""))
+        for m in CANDIDATES)
+    body = json.dumps({
+        # The cheap models worth using here are reasoning models, and a routing
+        # decision does not need reasoning. Left on, the whole max_tokens budget
+        # goes to thinking tokens and the reply comes back stop_reason=max_tokens
+        # with no text at all. OpenRouter's own {"reasoning": {"enabled": false}}
+        # is NOT honoured on this endpoint; the Anthropic-style field is.
+        "model": ROUTER_MODEL, "max_tokens": 200, "temperature": 0,
+        "thinking": {"type": "disabled"},
+        "provider": prefs_for(ROUTER_MODEL),
+        "messages": [{"role": "user", "content": ROUTER_PROMPT % (listing, task)}],
+    }).encode()
+    try:
+        conn = http.client.HTTPSConnection("openrouter.ai", timeout=20)
+        conn.request("POST", "/api/v1/messages", body=body, headers={
+            "Authorization": "Bearer " + key, "Content-Type": "application/json",
+            "anthropic-version": "2023-06-01"})
+        payload = json.loads(conn.getresponse().read())
+        conn.close()
+    except Exception:
+        return None
+    blocks = [b for b in payload.get("content", []) if isinstance(b, dict)]
+    text = " ".join(b.get("text") or b.get("thinking") or "" for b in blocks)
+    # Match, don't parse: a model may wrap the id in prose, and it drops the
+    # leading "~" of an alias id about half the time. Thinking text is included
+    # as a last resort for when the budget ran out before any text was emitted.
+    flat = text.replace("~", "")
+    for m in sorted(CANDIDATES, key=lambda x: -len(x["id"])):
+        if m["id"].replace("~", "") in flat:
+            return m["id"]
+    return None
+
+
 def resolve_auto(req):
     """Map the auto pseudo-model onto a real one. One-way: never downgrades."""
     key = conv_key(req)
     with _auto_lock:
         pinned = _auto_pins.get(key)
-        if pinned == AUTO_STRONG:
-            return AUTO_STRONG           # escalation is permanent for this conversation
-        why = looks_hard(req)
-        chosen = AUTO_STRONG if why else (pinned or AUTO_CHEAP)
+    if pinned == FALLBACK:
+        return FALLBACK                  # escalation is permanent for this conversation
+    if pinned:
+        chosen = FALLBACK if looks_hard(req) else pinned
+    elif looks_hard(req):
+        chosen = FALLBACK                # already real work; nothing to decide
+    else:
+        # First turn: spend one cheap call working out what this task needs.
+        chosen = ask_router_model(task_text(req)) or FALLBACK
+    with _auto_lock:
         _auto_pins[key] = chosen
         if len(_auto_pins) > 512:        # bounded; oldest insertions drop first
             for k in list(_auto_pins)[:128]:
@@ -337,16 +452,22 @@ class Router(BaseHTTPRequestHandler):
         except Exception as e:
             self.log_message("anthropic model list failed: %s", e)
 
-        key = or_key()
-        if key:
+        if CANDIDATES:
+            for m in CANDIDATES:
+                label = m.get("name") or m["id"]
+                if m.get("zdr", True) is False:
+                    label += " (no ZDR)"      # the disclaimer, where it is seen
+                out.append({"type": "model", "id": m["id"], "display_name": label,
+                            "created_at": "2026-01-01T00:00:00Z"})
+        elif or_key():
+            # No catalog: fall back to the old substring filter over OpenRouter.
             try:
                 c = http.client.HTTPSConnection("openrouter.ai", timeout=30)
                 c.request("GET", "/api/v1/models",
-                          headers={"Authorization": "Bearer " + key})
+                          headers={"Authorization": "Bearer " + or_key()})
                 for m in json.loads(c.getresponse().read()).get("data", []):
                     mid = m.get("id", "")
-                    # skip async batch endpoints; keep ~latest aliases
-                    if ":" in mid:
+                    if ":" in mid:            # skip async batch endpoints
                         continue
                     if any(s in mid.lower() for s in SURFACE):
                         out.append({"type": "model", "id": mid,

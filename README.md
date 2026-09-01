@@ -52,14 +52,23 @@ actually served, latency, tokens, and cost when reported.
 
 ## Auto
 
-An extra picker entry, **"Auto — cheap first, escalates"**. Select it for a session of mundane
-work: cheap turns go to a cheap provider, and anything that looks like real work escalates and
-*stays* escalated.
+An extra picker entry, **"Auto — routed per task"**. Rather than defaulting to something cheap,
+Auto spends one call on a **cheap router model** that reads the task and names the model best
+suited to it, choosing from the catalog and its `good_at` descriptions.
 
-```
-{"model_requested": "~google/gemini-flash-latest", "auto_from": "~auto/auto",
- "model_used": "google/gemini-3.7-flash", "cost": 6.2e-05}
-```
+Measured picks, `~deepseek/deepseek-v4-flash-latest` routing at ~1.7 s and ~$0.00002 a call:
+
+| Task | Picked |
+|---|---|
+| rename all the `.txt` files to `.md` | DeepSeek Flash — $0.05/1M |
+| what does `chmod 755` mean | Gemini Flash |
+| prove this bound is tight, implement in Rust | DeepSeek Pro |
+| reconcile three 200-page lab PDFs | Gemini Pro |
+| which CSS rule is wrong in this screenshot | Gemini Flash |
+| refactor auth across 12 files until tests pass | DeepSeek Pro |
+
+Only the **last user message, truncated to 2000 characters**, is sent to the router model — it
+needs the gist, and it is a third party that does not need the whole conversation.
 
 Two design decisions, both load-bearing:
 
@@ -70,10 +79,21 @@ Switching providers is a **full cache miss at full input price**, so a router th
 each turn can lose more on cache misses than it saves on cheap tokens. Auto pins its choice to a
 conversation key derived from the opening turn, and escalation is one-way.
 
-**Escalation triggers are structural, not semantic.** No classifier model, because "is this
-question hard" is not knowable from the first message. What *is* knowable is whether the session
-has become real work: more than 3 tools offered, more than 6 messages deep, or a prompt past
-`CLAUDE_ROUTER_AUTO_CHARS`.
+**Escalation is a safety net, and it is structural rather than semantic.** Picking the model is
+the router model's job; escalation only catches a session that *became* real work after that
+decision was made — more than 3 tools offered, more than 6 messages deep, or a prompt past
+`CLAUDE_ROUTER_AUTO_CHARS`. It escalates to `fallback` and never comes back down.
+
+`fallback` also absorbs every failure: router model unreachable, a reply naming nothing in the
+catalog, no OpenRouter key. Auto degrades to a working model rather than to an error.
+
+> [!tip]
+> Cheap models worth using as the router are **reasoning** models, and a routing decision does
+> not need reasoning. Left on, the entire `max_tokens` budget goes to thinking tokens and the
+> reply comes back `stop_reason: max_tokens` with no text at all. OpenRouter's own
+> `{"reasoning": {"enabled": false}}` is **not** honoured on the Messages endpoint — the
+> Anthropic-style `{"thinking": {"type": "disabled"}}` is, and it cut the call from 2.8 s to
+> 1.4 s. Ids also come back without their leading `~` about half the time, so matching ignores it.
 
 > [!note]
 > **On a subscription, this saves quota rather than money.** Anthropic models are already paid
@@ -81,6 +101,42 @@ has become real work: more than 3 tools offered, more than 6 messages deep, or a
 > mundane turns stop burning Claude rate limit you would rather spend on real work — not
 > because it is cheaper. That is also why `CLAUDE_ROUTER_AUTO_STRONG` defaults to an Anthropic
 > model: there is no reason to pay OpenRouter for the hard turns.
+
+## Models
+
+`models.json` is the catalog: what appears in the picker, and what Auto may choose from. Manage
+it with `switchboard.py`, which looks each id up on OpenRouter so the catalog cannot drift into
+models that do not exist:
+
+```sh
+python3 switchboard.py list
+python3 switchboard.py add ~google/gemini-pro-latest --good-at "long documents, large codebases"
+python3 switchboard.py add qwen/qwen3.8-flash --no-zdr --good-at "cheap agentic and coding work"
+python3 switchboard.py remove qwen/qwen3.8-flash
+python3 switchboard.py sync          # publish to the picker, then restart Claude Code
+```
+
+`add` fills in name, price, context and a guessed family/tier from OpenRouter. Restart the router
+and re-run `sync` for a change to reach the picker.
+
+**Tiers work like Claude's levels.** Each entry carries a `family` and a `tier`, so a family can
+appear at more than one strength — Gemini Pro alongside Gemini Flash, DeepSeek Pro alongside
+DeepSeek Flash — and the picker lists them as siblings. Claude Code's picker is a flat list with
+no submenus, so this is naming convention rather than nesting, but it reads the same way and Auto
+uses `tier` and `price` when choosing.
+
+> [!warning]
+> **Zero-data-retention is per model, and it is not free.** The router asks OpenRouter for ZDR
+> providers by default. A model whose entry says `"zdr": false` has **no** ZDR provider at all —
+> requesting one returns no candidates and the request simply fails — so for those the constraint
+> is dropped and the prompt does reach a provider that may retain it. Those entries are labelled
+> **"(no ZDR)"** in the picker so the trade is made knowingly. Qwen Flash is the one shipped that
+> way: a single Alibaba endpoint, no ZDR option.
+>
+> ZDR also costs money on models that *do* offer it. DeepSeek Pro's cheapest providers
+> (StreamLake at $0.66/1M, GMICloud, Alibaba) are all non-ZDR, so insisting on ZDR lands you
+> around $1.30/1M — roughly double. `switchboard.py list` shows the price you are actually
+> choosing.
 
 ## How it works
 
@@ -160,12 +216,12 @@ Then `exec zsh`, launch `claude`, and **restart it once more** so the picker rea
 |---|---|---|
 | `ANTHROPIC_BASE_URL` | — | must point at the router |
 | `CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY` | — | must be `1` |
-| `CLAUDE_ROUTER_MODELS` | `grok` | substrings of OpenRouter ids to surface |
 | `CLAUDE_ROUTER_PORT` | `8787` | listen port |
 | `CLAUDE_ROUTER_LOG` | `~/.local/share/claude-router/requests.log` | request log path |
-| `CLAUDE_ROUTER_AUTO_CHEAP` | `~google/gemini-flash-latest` | what Auto uses for mundane turns |
-| `CLAUDE_ROUTER_AUTO_STRONG` | `claude-sonnet-5` | what Auto escalates to |
+| `CLAUDE_ROUTER_AUTO_ROUTER` | `models.json` `router_model` | cheap model that picks for Auto |
+| `CLAUDE_ROUTER_AUTO_FALLBACK` | `models.json` `fallback` | used on escalation or any failure |
 | `CLAUDE_ROUTER_AUTO_CHARS` | `24000` | prompt size that forces escalation |
+| `CLAUDE_ROUTER_MODELS` | `grok` | legacy substring filter, used only if `models.json` is missing |
 
 ## Troubleshooting
 
