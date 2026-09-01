@@ -10,7 +10,7 @@
     "grok": "xAI Grok",
     "glm": "Z.ai GLM"
   },
-  "_picker_note": "Controls ONLY how long the /model menu is. Everything in 'models' stays available to Auto whether listed here or not. A family row collapses its variants into one entry and picks the tier per task, because Claude Code's picker cannot put variants behind a row. Six Claude rows are always present, so keeping this to four keeps the menu at ten with no overflow.",
+  "_picker_note": "Two ways to shorten the /model menu. (1) 'picker' below drives gateway discovery: family rows collapse variants and pick a tier per task. (2) 'switchboard.py picker --apply' writes a modelPicker lineup into ~/.claude/settings.json with replaceBuiltInOptions, which replaces the WHOLE menu — so you can drop Claude rows you never use and list every variant explicitly instead. Either way, Auto still routes across the full 'models' list. The menu shows 10 rows before collapsing the rest behind '… +N models'.",
   "picker": {
     "families": [
       "deepseek",
@@ -20,6 +20,22 @@
       "moonshotai/kimi-k3"
     ]
   },
+
+  "_claude_rows_note": "Used only by 'picker --apply'. These are the built-in Claude rows worth keeping when the lineup is replaced; drop or reorder freely. Aliases work ('sonnet', 'opus[1m]').",
+  "claude_rows": [
+    {"model": "opus[1m]", "label": "Opus (1M)", "description": "Everyday complex work"},
+    {"model": "sonnet", "label": "Sonnet", "description": "Efficient for routine tasks"},
+    {"model": "haiku", "label": "Haiku", "description": "Fastest for quick answers"}
+  ],
+
+  "_apply_models_note": "Used only by 'picker --apply': the exact gateway variants to list as their own rows. Anything omitted is still routable by Auto.",
+  "apply_models": [
+    "~deepseek/deepseek-v4-flash-latest",
+    "deepseek/deepseek-v4-pro",
+    "~google/gemini-flash-latest",
+    "~google/gemini-pro-latest",
+    "moonshotai/kimi-k3"
+  ],
   "models": [
     {
       "id": "claude-haiku-4-5-20251001",

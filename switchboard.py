@@ -154,6 +154,74 @@ def cmd_remove(args):
     return 0
 
 
+SETTINGS = os.path.expanduser("~/.claude/settings.json")
+
+
+def cmd_apply(args):
+    """Write a modelPicker lineup into ~/.claude/settings.json.
+
+    replaceBuiltInOptions defines the WHOLE menu, so Claude rows you never use
+    can be dropped and every gateway variant listed explicitly — which fits under
+    the ten-row limit in a way that adding rows never does. Schema, from the
+    binary: {"options": [{model, label?, description?}], replaceBuiltInOptions}.
+    """
+    cat = load()
+    by_id = {m["id"]: m for m in cat["models"]}
+    opts = list(cat.get("claude_rows", []))
+    for mid in cat.get("apply_models", []):
+        m = by_id.get(mid)
+        if not m:
+            print("not in the catalog, skipped: %s" % mid, file=sys.stderr)
+            continue
+        label = m.get("name") or mid
+        if m.get("zdr", True) is False:
+            label += " (no ZDR)"
+        p = m.get("price", ["?", "?"])
+        desc = "$%s/$%s per 1M" % (p[0], p[1])
+        if m.get("specialties"):
+            desc += " · " + ", ".join(m["specialties"])
+        opts.append({"model": mid, "label": label, "description": desc})
+    opts.append({"model": "~auto/auto", "label": "Auto",
+                 "description": "Routed per task by a cheap router model"})
+
+    try:
+        with open(SETTINGS) as f:
+            s = json.load(f)
+    except Exception as e:
+        print("could not read %s: %s" % (SETTINGS, e), file=sys.stderr)
+        return 1
+
+    if args.revert:
+        if s.pop("modelPicker", None) is None:
+            print("no modelPicker lineup was set")
+            return 0
+        with open(SETTINGS, "w") as f:
+            json.dump(s, f, indent=2)
+            f.write("\n")
+        print("removed the modelPicker lineup — the built-in menu is back. "
+              "Restart Claude Code.")
+        return 0
+
+    backup = SETTINGS + ".bak"
+    with open(backup, "w") as f:
+        json.dump(s, f, indent=2)
+        f.write("\n")
+    s["modelPicker"] = {"replaceBuiltInOptions": True, "options": opts}
+    with open(SETTINGS, "w") as f:
+        json.dump(s, f, indent=2)
+        f.write("\n")
+
+    print("wrote a %d-row lineup to %s (backup: %s)" % (len(opts), SETTINGS, backup))
+    for i, o in enumerate(opts, 1):
+        print("  %2d. %-16s %s" % (i, o.get("label", ""), o["model"]))
+    if len(opts) > 10:
+        print("⚠ over 10 rows — the rest collapse behind '… +%d models'."
+              % (len(opts) - 10))
+    print("\nreplaceBuiltInOptions hides gateway-discovered rows, so this lineup is "
+          "the whole menu.\nRestart Claude Code. Undo with: switchboard.py apply --revert")
+    return 0
+
+
 def cmd_picker(args):
     """Compose the /model menu. Affects menu length only — Auto still sees everything."""
     cat = load()
@@ -246,6 +314,12 @@ def main():
                         "per task) or one exact model row. Repeatable.")
     p.add_argument("--rm", action="append", metavar="FAMILY|ID", help="remove a row")
     p.set_defaults(fn=cmd_picker)
+
+    ap2 = sub.add_parser("apply", help="write a modelPicker lineup to settings.json, "
+                                       "replacing the whole menu so every variant fits")
+    ap2.add_argument("--revert", action="store_true",
+                     help="remove the lineup and restore the built-in menu")
+    ap2.set_defaults(fn=cmd_apply)
 
     sub.add_parser("sync", help="publish the catalog to the picker cache"
                    ).set_defaults(fn=cmd_sync)
