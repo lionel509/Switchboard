@@ -154,6 +154,58 @@ def cmd_remove(args):
     return 0
 
 
+def cmd_picker(args):
+    """Compose the /model menu. Affects menu length only — Auto still sees everything."""
+    cat = load()
+    p = cat.setdefault("picker", {"families": [], "models": []})
+    fams = p.setdefault("families", [])
+    mods = p.setdefault("models", [])
+    known = {m["id"] for m in cat["models"]}
+    known_fams = {m.get("family") for m in cat["models"] if m.get("family") != "claude"}
+
+    for tgt in (args.add or []):
+        if tgt in known_fams:
+            if tgt not in fams:
+                fams.append(tgt)
+        elif tgt in known:
+            if "/" not in tgt:
+                print("%s is an Anthropic id — already in the picker natively" % tgt,
+                      file=sys.stderr)
+                continue
+            if tgt not in mods:
+                mods.append(tgt)
+        else:
+            print("not a known family or catalog id: %s" % tgt, file=sys.stderr)
+            return 1
+    for tgt in (args.rm or []):
+        if tgt in fams:
+            fams.remove(tgt)
+        elif tgt in mods:
+            mods.remove(tgt)
+        else:
+            print("not currently in the picker: %s" % tgt, file=sys.stderr)
+            return 1
+    if args.add or args.rm:
+        save(cat)
+
+    rows = len(fams) + len(mods) + 1                  # +1 for Auto
+    print("gateway rows (%d):" % rows)
+    for f in fams:
+        tiers = sorted({m.get("tier", "?") for m in cat["models"]
+                        if m.get("family") == f})
+        print("  family  %-14s -> %s" % (f, "/".join(tiers)))
+    for m in mods:
+        print("  model   %s" % m)
+    print("  auto    ~auto/auto")
+    total = 6 + rows
+    print("\n6 Claude rows are always shown, so the menu is %d rows." % total)
+    if total > 10:
+        print("⚠ Over 10 — Claude Code collapses the rest behind '… +%d models'." % (total - 10))
+    if args.add or args.rm:
+        print("Restart the router and run: switchboard.py sync")
+    return 0
+
+
 def cmd_sync(args):
     sync = os.path.join(HERE, "sync-models.py")
     return os.spawnv(os.P_WAIT, sys.executable, [sys.executable, sync])
@@ -186,6 +238,14 @@ def main():
     r = sub.add_parser("remove", help="remove a model")
     r.add_argument("id")
     r.set_defaults(fn=cmd_remove)
+
+    p = sub.add_parser("picker", help="compose the /model menu (length only; "
+                                      "Auto still sees the whole catalog)")
+    p.add_argument("--add", action="append", metavar="FAMILY|ID",
+                   help="add a family row (collapses its variants, tier picked "
+                        "per task) or one exact model row. Repeatable.")
+    p.add_argument("--rm", action="append", metavar="FAMILY|ID", help="remove a row")
+    p.set_defaults(fn=cmd_picker)
 
     sub.add_parser("sync", help="publish the catalog to the picker cache"
                    ).set_defaults(fn=cmd_sync)
