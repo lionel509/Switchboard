@@ -38,7 +38,10 @@ def fetch():
             cat = json.load(f)
         out = []
         for m in cat.get("models", []):
-            if not m.get("id"):
+            # Bare ids are Anthropic's own, already in the picker natively. They
+            # stay in the catalog because Auto picks between them, but publishing
+            # them here would duplicate every Claude entry.
+            if not m.get("id") or "/" not in m["id"]:
                 continue
             label = m.get("name") or m["id"]
             if m.get("zdr", True) is False:

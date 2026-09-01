@@ -6,6 +6,36 @@
 
   "models": [
     {
+      "id": "claude-haiku-4-5-20251001",
+      "name": "Claude Haiku",
+      "family": "claude",
+      "tier": "haiku",
+      "billing": "subscription",
+      "price": [0, 0],
+      "context": 200000,
+      "good_at": "quick well-formed answers and light tool use, with no cash cost. Costs subscription quota."
+    },
+    {
+      "id": "claude-sonnet-5",
+      "name": "Claude Sonnet",
+      "family": "claude",
+      "tier": "sonnet",
+      "billing": "subscription",
+      "price": [0, 0],
+      "context": 1000000,
+      "good_at": "the reliable default for real coding and agentic tool use, with no cash cost. Costs subscription quota."
+    },
+    {
+      "id": "claude-opus-5",
+      "name": "Claude Opus",
+      "family": "claude",
+      "tier": "opus",
+      "billing": "subscription",
+      "price": [0, 0],
+      "context": 1000000,
+      "good_at": "hardest reasoning and large multi-file refactors, with no cash cost. Costs the most subscription quota."
+    },
+    {
       "id": "~deepseek/deepseek-v4-flash-latest",
       "name": "DeepSeek Flash",
       "family": "deepseek",

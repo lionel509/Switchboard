@@ -56,11 +56,14 @@ def cmd_list(args):
     for fam in sorted(by_family):
         print(fam)
         for m in sorted(by_family[fam], key=lambda x: x.get("price", [0])[0]):
-            p = m.get("price", ["?", "?"])
+            if m.get("billing") == "subscription":
+                cost = "quota, no cash"       # not $0 — it is a different currency
+            else:
+                p = m.get("price", ["?", "?"])
+                cost = "$%s/$%s per 1M" % (p[0], p[1])
             warn = "  ⚠ no ZDR" if m.get("zdr", True) is False else ""
-            print("  %-9s %-34s $%-7s/$%-7s %s%s"
-                  % (m.get("tier", "?"), m["id"], p[0], p[1],
-                     m.get("name", ""), warn))
+            print("  %-9s %-34s %-18s %s%s"
+                  % (m.get("tier", "?"), m["id"], cost, m.get("name", ""), warn))
         print()
     return 0
 
@@ -70,6 +73,22 @@ def cmd_add(args):
     if any(m["id"] == args.id for m in cat["models"]):
         print("already in the catalog: %s" % args.id, file=sys.stderr)
         return 1
+
+    if args.subscription:
+        # An Anthropic id billed to the plan. Not on OpenRouter, so nothing to
+        # look up, and never published to the picker — it is already there.
+        family, tier = guess(args.id)
+        cat["models"].append({"id": args.id, "name": args.name or args.id,
+                              "family": args.family or family,
+                              "tier": args.tier or tier,
+                              "billing": "subscription", "price": [0, 0],
+                              "good_at": args.good_at or ""})
+        save(cat)
+        print("added %s as a subscription model (no cash cost, consumes quota)"
+              % args.id)
+        print("Restart the router — no sync needed, it is already in the picker.")
+        return 0
+
     try:
         remote = or_models()
     except Exception as e:
@@ -148,6 +167,8 @@ def main():
     a.add_argument("--good-at", help="what it is for — fed to Auto's router model")
     a.add_argument("--no-zdr", action="store_true",
                    help="model has no zero-data-retention provider")
+    a.add_argument("--subscription", action="store_true",
+                   help="an Anthropic id billed to the plan; skips the OpenRouter lookup")
     a.set_defaults(fn=cmd_add)
 
     r = sub.add_parser("remove", help="remove a model")

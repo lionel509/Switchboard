@@ -54,18 +54,24 @@ actually served, latency, tokens, and cost when reported.
 
 An extra picker entry, **"Auto — routed per task"**. Rather than defaulting to something cheap,
 Auto spends one call on a **cheap router model** that reads the task and names the model best
-suited to it, choosing from the catalog and its `good_at` descriptions.
+suited to it — choosing across the whole catalog, **your Claude models included**.
 
-Measured picks, `~deepseek/deepseek-v4-flash-latest` routing at ~1.7 s and ~$0.00002 a call:
+That last part is what makes it work. The router weighs two currencies that do not trade against
+each other: Claude models cost **no cash but consume plan quota**, and OpenRouter models cost
+**cash but no quota**. So mundane bulk work goes to the cheapest paid model to preserve quota,
+and anything needing reliable tool use goes to Claude, where it is free at the margin.
 
-| Task | Picked |
-|---|---|
-| rename all the `.txt` files to `.md` | DeepSeek Flash — $0.05/1M |
-| what does `chmod 755` mean | Gemini Flash |
-| prove this bound is tight, implement in Rust | DeepSeek Pro |
-| reconcile three 200-page lab PDFs | Gemini Pro |
-| which CSS rule is wrong in this screenshot | Gemini Flash |
-| refactor auth across 12 files until tests pass | DeepSeek Pro |
+Measured picks, `~deepseek/deepseek-v4-flash-latest` routing at ~2 s and ~$0.00002 a call:
+
+| Task | Picked | Costs |
+|---|---|---|
+| rename `.txt` → `.md`, fix links | DeepSeek Flash | $0.05/1M |
+| reformat a 900-line JSON file | DeepSeek Flash | $0.05/1M |
+| what does `chmod 755` mean | Claude Haiku | quota |
+| debug a null deref in auth middleware | Claude Sonnet | quota |
+| refactor auth across 12 files until tests pass | Claude Sonnet | quota |
+| prove the bound is tight, implement in Rust | Claude Opus | quota |
+| reconcile three 200-page lab PDFs | Claude Opus | quota |
 
 Only the **last user message, truncated to 2000 characters**, is sent to the router model — it
 needs the gist, and it is a third party that does not need the whole conversation.
@@ -118,6 +124,17 @@ python3 switchboard.py sync          # publish to the picker, then restart Claud
 
 `add` fills in name, price, context and a guessed family/tier from OpenRouter. Restart the router
 and re-run `sync` for a change to reach the picker.
+
+Anthropic ids are not on OpenRouter, so they are added with `--subscription`, which skips the
+lookup and marks them as costing quota rather than cash:
+
+```sh
+python3 switchboard.py add claude-opus-5 --subscription --good-at "hardest reasoning, large refactors"
+```
+
+Those entries are **never published to the picker** — Claude Code already lists them natively, and
+publishing them again would duplicate every Claude row. They live in the catalog purely so Auto
+can pick them.
 
 **Tiers work like Claude's levels.** Each entry carries a `family` and a `tier`, so a family can
 appear at more than one strength — Gemini Pro alongside Gemini Flash, DeepSeek Pro alongside

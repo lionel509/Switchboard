@@ -209,9 +209,20 @@ from the list and nothing else.
 Models:
 %s
 
-Prefer the cheapest model whose description covers the task. Choose an expensive \
-model only when the task plainly needs stronger reasoning, very long context, or \
-careful code work.
+There are two currencies here, and they do not trade against each other:
+- [subscription] models cost NO money. They consume a limited monthly quota, and \
+they are the most reliable at multi-step tool use.
+- Priced models cost real cash per token but consume no quota.
+
+Rules, in order:
+1. Bulk mechanical work - renames, greps, reformatting, simple mechanical edits - \
+goes to the cheapest priced model that covers it. This is the whole point: it \
+preserves quota for work that needs it.
+2. Real coding, multi-step tool use, debugging, or anything where a wrong answer \
+costs time goes to a [subscription] model. They are free at the margin, so paying \
+cash for this would be strictly worse.
+3. Only pick a priced model over a [subscription] one when its description names a \
+strength the task actually needs - very long context, or a specific modality.
 
 Task:
 %s
@@ -226,10 +237,14 @@ def ask_router_model(task):
     key = or_key()
     if not key:
         return None
-    listing = "\n".join(
-        "%s | $%s/$%s per 1M | %s" % (m["id"], m.get("price", ["?", "?"])[0],
-                                      m.get("price", ["?", "?"])[1], m.get("good_at", ""))
-        for m in CANDIDATES)
+    def cost(m):
+        if m.get("billing") == "subscription":
+            return "[subscription]"
+        p = m.get("price", ["?", "?"])
+        return "$%s/$%s per 1M" % (p[0], p[1])
+
+    listing = "\n".join("%s | %s | %s" % (m["id"], cost(m), m.get("good_at", ""))
+                        for m in CANDIDATES)
     body = json.dumps({
         # The cheap models worth using here are reasoning models, and a routing
         # decision does not need reasoning. Left on, the whole max_tokens budget
@@ -252,12 +267,23 @@ def ask_router_model(task):
         return None
     blocks = [b for b in payload.get("content", []) if isinstance(b, dict)]
     text = " ".join(b.get("text") or b.get("thinking") or "" for b in blocks)
-    # Match, don't parse: a model may wrap the id in prose, and it drops the
-    # leading "~" of an alias id about half the time. Thinking text is included
-    # as a last resort for when the budget ran out before any text was emitted.
-    flat = text.replace("~", "")
-    for m in sorted(CANDIDATES, key=lambda x: -len(x["id"])):
-        if m["id"].replace("~", "") in flat:
+    # Match, don't parse. The reply drifts in three ways depending on which
+    # provider throughput-sorting landed on: it drops the leading "~" of an alias
+    # roughly half the time, sometimes gives only the slug, and sometimes the
+    # display name. Longest id first so a short id cannot shadow a longer one.
+    # Thinking text is included for when the budget ran out before any text.
+    flat = text.replace("~", "").lower()
+    cands = sorted(CANDIDATES, key=lambda x: -len(x["id"]))
+    for m in cands:                                  # full id
+        if m["id"].replace("~", "").lower() in flat:
+            return m["id"]
+    for m in cands:                                  # bare slug
+        slug = m["id"].split("/")[-1].lower()
+        if len(slug) > 6 and slug in flat:
+            return m["id"]
+    for m in cands:                                  # display name
+        name = (m.get("name") or "").lower()
+        if len(name) > 4 and name in flat:
             return m["id"]
     return None
 
@@ -454,6 +480,11 @@ class Router(BaseHTTPRequestHandler):
 
         if CANDIDATES:
             for m in CANDIDATES:
+                # Bare ids are Anthropic's own and already in the picker natively;
+                # publishing them again would duplicate every Claude entry. They
+                # stay in the catalog because Auto still picks between them.
+                if "/" not in m["id"]:
+                    continue
                 label = m.get("name") or m["id"]
                 if m.get("zdr", True) is False:
                     label += " (no ZDR)"      # the disclaimer, where it is seen
