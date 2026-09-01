@@ -142,6 +142,32 @@ DeepSeek Flash — and the picker lists them as siblings. Claude Code's picker i
 no submenus, so this is naming convention rather than nesting, but it reads the same way and Auto
 uses `tier` and `price` when choosing.
 
+### Why not just use `openrouter/auto`?
+
+OpenRouter has its own auto router, and it is genuinely good: it classifies each prompt into one
+of ~30 task types, ranks candidates by community spend over a trailing 7 days, charges no router
+fee, and needs no catalog maintained at all. It is in the catalog here as a delegation target.
+
+It cannot replace this router, for one structural reason and one measured one:
+
+**It cannot see your subscription.** `openrouter/auto` only ever picks OpenRouter models, so
+everything costs cash. On a Claude plan the whole economic point is that Claude is free at the
+margin — the reason to send bulk work elsewhere is to preserve *quota*, not to save money.
+Delegating the top-level decision would route real work to paid models while Sonnet sat there
+costing nothing.
+
+**Its choices are not yours.** Asked to build a React dashboard it picked DeepSeek Flash, not
+Kimi K3 — community spend is a popularity signal, not a fit-for-your-task one, and `cost_tier`
+had no observable effect per request (as `provider.cost_tier` it is a 400). Measured through this
+router, `openrouter/auto` also sent a **file rename to `openai/gpt-5.6-luna`** at $0.00005 —
+five times DeepSeek Flash for mechanical work. Because the pin is per conversation, a whole
+session can sit on a frontier model at cash rates.
+
+So the two are layered. This router keeps the decision only it can make — quota versus cash, and
+specialty overrides — and hands `openrouter/auto` the case it is best at: *a priced model is
+right, but none of the descriptions clearly fits*. Rule 3 keeps mechanical work on the cheapest
+named model, where the price is predictable.
+
 ### Keeping the menu short
 
 Claude Code always shows its own six Claude rows, and past ten the picker starts hiding the rest

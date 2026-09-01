@@ -17,24 +17,36 @@
       "gemini"
     ],
     "models": [
-      "moonshotai/kimi-k3"
+      "moonshotai/kimi-k3",
+      "openrouter/auto"
     ]
   },
-
   "_claude_rows_note": "Used only by 'picker --apply'. These are the built-in Claude rows worth keeping when the lineup is replaced; drop or reorder freely. Aliases work ('sonnet', 'opus[1m]').",
   "claude_rows": [
-    {"model": "opus[1m]", "label": "Opus (1M)", "description": "Everyday complex work"},
-    {"model": "sonnet", "label": "Sonnet", "description": "Efficient for routine tasks"},
-    {"model": "haiku", "label": "Haiku", "description": "Fastest for quick answers"}
+    {
+      "model": "opus[1m]",
+      "label": "Opus (1M)",
+      "description": "Everyday complex work"
+    },
+    {
+      "model": "sonnet",
+      "label": "Sonnet",
+      "description": "Efficient for routine tasks"
+    },
+    {
+      "model": "haiku",
+      "label": "Haiku",
+      "description": "Fastest for quick answers"
+    }
   ],
-
   "_apply_models_note": "Used only by 'picker --apply': the exact gateway variants to list as their own rows. Anything omitted is still routable by Auto.",
   "apply_models": [
     "~deepseek/deepseek-v4-flash-latest",
     "deepseek/deepseek-v4-pro",
     "~google/gemini-flash-latest",
     "~google/gemini-pro-latest",
-    "moonshotai/kimi-k3"
+    "moonshotai/kimi-k3",
+    "openrouter/auto"
   ],
   "models": [
     {
@@ -179,6 +191,19 @@
         "react"
       ],
       "source": "Arena WebDev #1 (1679) Jul 2026; Vercel Next.js eval tied #1 at 92%"
+    },
+    {
+      "id": "openrouter/auto",
+      "name": "OpenRouter Auto",
+      "family": "openrouter",
+      "tier": "auto",
+      "price": [
+        -1,
+        -1
+      ],
+      "context": 2000000,
+      "good_at": "ANY paid work with no specialist need. Delegates the choice: OpenRouter classifies the prompt into a task type and ranks models by community spend over 7 days, so it tracks the field without this catalog being maintained. Prefer it over naming a specific priced model unless that model has a SPECIALTY the task needs.",
+      "source": "openrouter.ai auto router; ranks by trailing-7-day community task spend"
     }
   ]
 }

@@ -58,6 +58,8 @@ def cmd_list(args):
         for m in sorted(by_family[fam], key=lambda x: x.get("price", [0])[0]):
             if m.get("billing") == "subscription":
                 cost = "quota, no cash"       # not $0 — it is a different currency
+            elif (m.get("price") or [0])[0] < 0:
+                cost = "varies (delegated)"
             else:
                 p = m.get("price", ["?", "?"])
                 cost = "$%s/$%s per 1M" % (p[0], p[1])
@@ -106,8 +108,12 @@ def cmd_add(args):
 
     m = remote[args.id]
     pricing = m.get("pricing", {})
-    price = [round(float(pricing.get("prompt", 0)) * 1e6, 4),
-             round(float(pricing.get("completion", 0)) * 1e6, 4)]
+    # Router models (openrouter/auto and friends) report -1: the price is whatever
+    # they end up selecting, so there is no number to record.
+    variable = float(pricing.get("prompt", 0)) < 0
+    price = [-1, -1] if variable else [
+        round(float(pricing.get("prompt", 0)) * 1e6, 4),
+        round(float(pricing.get("completion", 0)) * 1e6, 4)]
     family, tier = guess(args.id)
     entry = {"id": args.id,
              "name": args.name or m.get("name") or args.id,
@@ -177,7 +183,10 @@ def cmd_apply(args):
         if m.get("zdr", True) is False:
             label += " (no ZDR)"
         p = m.get("price", ["?", "?"])
-        desc = "$%s/$%s per 1M" % (p[0], p[1])
+        if isinstance(p[0], (int, float)) and p[0] < 0:
+            desc = "Priced by whatever it selects"
+        else:
+            desc = "$%s/$%s per 1M" % (p[0], p[1])
         if m.get("specialties"):
             desc += " · " + ", ".join(m["specialties"])
         opts.append({"model": mid, "label": label, "description": desc})

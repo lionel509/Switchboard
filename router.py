@@ -222,14 +222,19 @@ Rules, in order:
 over a [subscription] model, and even if it is expensive. A measured win at the \
 actual job beats saving money. Only apply this when the task really is that kind \
 of work, not merely adjacent to it.
-2. Bulk mechanical work - renames, greps, reformatting, simple mechanical edits - \
-goes to the cheapest priced model that covers it. This is the whole point: it \
-preserves quota for work that needs it.
-3. Real coding, multi-step tool use, debugging, or anything where a wrong answer \
+2. Real coding, multi-step tool use, debugging, or anything where a wrong answer \
 costs time goes to a [subscription] model. They are free at the margin, so paying \
 cash for this would be strictly worse.
-4. Only pick a priced model over a [subscription] one when its description names a \
-strength the task actually needs - very long context, or a specific modality.
+3. Bulk mechanical work - renames, greps, reformatting, simple mechanical edits - \
+goes to the CHEAPEST priced model that covers it. This is the whole point: it \
+preserves quota for work that needs it, at a price you can predict. NEVER send \
+mechanical work to an expensive priced model.
+4. If a priced model is right but none of the descriptions clearly fits the task, \
+send it to openrouter/auto, which delegates the choice to OpenRouter's own task \
+classifier. Use it when unsure - not for work rule 3 already covers, because a \
+delegated choice can land on an expensive model.
+5. Name one specific priced model when its description matches the task closely - \
+a particular modality, or context far beyond the others.
 
 Task:
 %s
@@ -250,6 +255,8 @@ def ask_router_model(task, cands=None):
         if m.get("billing") == "subscription":
             return "[subscription]"
         p = m.get("price", ["?", "?"])
+        if isinstance(p[0], (int, float)) and p[0] < 0:
+            return "[priced by whatever it selects]"
         return "$%s/$%s per 1M" % (p[0], p[1])
 
     def line(m):
@@ -258,7 +265,21 @@ def ask_router_model(task, cands=None):
             s += " SPECIALTY: %s." % ", ".join(m["specialties"])
         return s
 
-    listing = "\n".join(line(m) for m in cands)
+    # Group and order the list rather than relying on a rule to convey price.
+    # Told only in prose, "pick the cheapest" loses to a mid-priced model whose
+    # description sounds apt; shown as an ordering, it holds.
+    subs = [m for m in cands if m.get("billing") == "subscription"]
+    paid = sorted([m for m in cands if m.get("billing") != "subscription"],
+                  key=lambda m: (m.get("price") or [0])[0] if
+                  (m.get("price") or [0])[0] >= 0 else 1e9)
+    parts = []
+    if subs:
+        parts.append("NO CASH COST (consume plan quota):\n"
+                     + "\n".join(line(m) for m in subs))
+    if paid:
+        parts.append("COST CASH (listed cheapest first):\n"
+                     + "\n".join(line(m) for m in paid))
+    listing = "\n\n".join(parts) if parts else "\n".join(line(m) for m in cands)
     body = json.dumps({
         # The cheap models worth using here are reasoning models, and a routing
         # decision does not need reasoning. Left on, the whole max_tokens budget
