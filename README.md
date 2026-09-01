@@ -142,6 +142,34 @@ DeepSeek Flash — and the picker lists them as siblings. Claude Code's picker i
 no submenus, so this is naming convention rather than nesting, but it reads the same way and Auto
 uses `tier` and `price` when choosing.
 
+### Specialties
+
+A `specialties` list is a **measured** strength, and it is the highest-priority rule when Auto
+routes — above the cheap-for-bulk rule and above preferring a free subscription model. The point
+is that a benchmarked win at the actual job beats saving money:
+
+```sh
+python3 switchboard.py add moonshotai/kimi-k3 \
+  --specialty frontend --specialty ui --specialty css --specialty react \
+  --good-at "building user interfaces - React, CSS, layout, data visualisation" \
+  --source "Arena WebDev #1 (1679) Jul 2026; Vercel Next.js eval tied #1 at 92%"
+```
+
+Kimi K3 ships with that entry. It opened **#1 on Arena's WebDev leaderboard** at 1679, ahead of
+Claude Fable 5 (1631) and GPT-5.6 Sol (1618), first in 6 of 7 frontend domains, and independently
+tied first on Vercel's Next.js eval at 92%. So "build a React dashboard" routes to K3 even though
+Sonnet is free — and at $3/$15 per 1M that is a **deliberate decision to spend cash for a better
+result**, not an accident.
+
+> [!important]
+> Because a specialty outranks everything, an unfounded one quietly misroutes work and bills you
+> for it. `--source` exists to keep each claim answerable to something. Add a specialty for a
+> strength you can point at evidence for, not one you have a hunch about — and re-check them,
+> since leaderboards move and these entries do not.
+
+Verified not to over-trigger: with K3 in the catalog, "write a Python script to parse this CSV",
+"refactor auth across 12 files" and "rename all the .txt files" all still route elsewhere.
+
 > [!warning]
 > **Zero-data-retention is per model, and it is not free.** The router asks OpenRouter for ZDR
 > providers by default. A model whose entry says `"zdr": false` has **no** ZDR provider at all —

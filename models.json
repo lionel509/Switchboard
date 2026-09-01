@@ -1,9 +1,7 @@
 {
   "_comment": "Edit with switchboard.py (add/remove/list), or by hand. Prices are USD per 1M tokens, in/out, recorded when the entry was added — they drift, so treat them as ordering, not billing. 'good_at' is fed verbatim to the router model when Auto picks.",
-
   "router_model": "~deepseek/deepseek-v4-flash-latest",
   "fallback": "claude-sonnet-5",
-
   "models": [
     {
       "id": "claude-haiku-4-5-20251001",
@@ -11,7 +9,10 @@
       "family": "claude",
       "tier": "haiku",
       "billing": "subscription",
-      "price": [0, 0],
+      "price": [
+        0,
+        0
+      ],
       "context": 200000,
       "good_at": "quick well-formed answers and light tool use, with no cash cost. Costs subscription quota."
     },
@@ -21,7 +22,10 @@
       "family": "claude",
       "tier": "sonnet",
       "billing": "subscription",
-      "price": [0, 0],
+      "price": [
+        0,
+        0
+      ],
       "context": 1000000,
       "good_at": "the reliable default for real coding and agentic tool use, with no cash cost. Costs subscription quota."
     },
@@ -31,7 +35,10 @@
       "family": "claude",
       "tier": "opus",
       "billing": "subscription",
-      "price": [0, 0],
+      "price": [
+        0,
+        0
+      ],
       "context": 1000000,
       "good_at": "hardest reasoning and large multi-file refactors, with no cash cost. Costs the most subscription quota."
     },
@@ -40,7 +47,10 @@
       "name": "DeepSeek Flash",
       "family": "deepseek",
       "tier": "flash",
-      "price": [0.05, 0.16],
+      "price": [
+        0.05,
+        0.16
+      ],
       "context": 1310720,
       "good_at": "bulk mechanical work at the lowest price available - renames, greps, reformatting, straightforward edits. 1M context."
     },
@@ -49,7 +59,10 @@
       "name": "DeepSeek Pro",
       "family": "deepseek",
       "tier": "pro",
-      "price": [1.6, 3.2],
+      "price": [
+        1.6,
+        3.2
+      ],
       "context": 1048576,
       "good_at": "hard reasoning and multi-step code work at mid price. Strong on maths and algorithms."
     },
@@ -58,7 +71,10 @@
       "name": "Google Gemini Flash",
       "family": "gemini",
       "tier": "flash",
-      "price": [0.75, 3.75],
+      "price": [
+        0.75,
+        3.75
+      ],
       "context": 1048576,
       "good_at": "fast general work, summarising, multimodal input. A safe cheap default when unsure."
     },
@@ -67,7 +83,10 @@
       "name": "Google Gemini Pro",
       "family": "gemini",
       "tier": "pro",
-      "price": [2.0, 12.0],
+      "price": [
+        2.0,
+        12.0
+      ],
       "context": 1048576,
       "good_at": "long documents, large codebases, careful analysis over very large context."
     },
@@ -76,7 +95,10 @@
       "name": "Qwen Flash",
       "family": "qwen",
       "tier": "flash",
-      "price": [0.15, 0.47],
+      "price": [
+        0.15,
+        0.47
+      ],
       "context": 1000000,
       "zdr": false,
       "good_at": "cheap agentic and coding work, visual understanding, long video and document analysis."
@@ -86,7 +108,10 @@
       "name": "xAI Grok",
       "family": "grok",
       "tier": "pro",
-      "price": [2.0, 6.0],
+      "price": [
+        2.0,
+        6.0
+      ],
       "context": 2000000,
       "good_at": "current events, informal reasoning, code review with opinions."
     },
@@ -95,7 +120,10 @@
       "name": "Z.ai GLM",
       "family": "glm",
       "tier": "pro",
-      "price": [1.17, 3.96],
+      "price": [
+        1.17,
+        3.96
+      ],
       "context": 200000,
       "good_at": "agentic tool use and coding at mid price."
     },
@@ -104,9 +132,31 @@
       "name": "MoonshotAI Kimi",
       "family": "kimi",
       "tier": "pro",
-      "price": [2.55, 12.75],
+      "price": [
+        2.55,
+        12.75
+      ],
       "context": 256000,
       "good_at": "long-context reading and writing, research summarisation."
+    },
+    {
+      "id": "moonshotai/kimi-k3",
+      "name": "Kimi K3",
+      "family": "kimi",
+      "tier": "pro",
+      "price": [
+        3.0,
+        15.0
+      ],
+      "context": 1048576,
+      "good_at": "building user interfaces - React, CSS, layout, data visualisation, marketing pages",
+      "specialties": [
+        "frontend",
+        "ui",
+        "css",
+        "react"
+      ],
+      "source": "Arena WebDev #1 (1679) Jul 2026; Vercel Next.js eval tied #1 at 92%"
     }
   ]
 }

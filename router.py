@@ -214,14 +214,21 @@ There are two currencies here, and they do not trade against each other:
 they are the most reliable at multi-step tool use.
 - Priced models cost real cash per token but consume no quota.
 
+Some models list SPECIALTY tags. Those are measured, benchmarked strengths, not \
+general descriptions.
+
 Rules, in order:
-1. Bulk mechanical work - renames, greps, reformatting, simple mechanical edits - \
+1. If the task falls squarely inside a model's SPECIALTY, pick that model - even \
+over a [subscription] model, and even if it is expensive. A measured win at the \
+actual job beats saving money. Only apply this when the task really is that kind \
+of work, not merely adjacent to it.
+2. Bulk mechanical work - renames, greps, reformatting, simple mechanical edits - \
 goes to the cheapest priced model that covers it. This is the whole point: it \
 preserves quota for work that needs it.
-2. Real coding, multi-step tool use, debugging, or anything where a wrong answer \
+3. Real coding, multi-step tool use, debugging, or anything where a wrong answer \
 costs time goes to a [subscription] model. They are free at the margin, so paying \
 cash for this would be strictly worse.
-3. Only pick a priced model over a [subscription] one when its description names a \
+4. Only pick a priced model over a [subscription] one when its description names a \
 strength the task actually needs - very long context, or a specific modality.
 
 Task:
@@ -243,8 +250,13 @@ def ask_router_model(task):
         p = m.get("price", ["?", "?"])
         return "$%s/$%s per 1M" % (p[0], p[1])
 
-    listing = "\n".join("%s | %s | %s" % (m["id"], cost(m), m.get("good_at", ""))
-                        for m in CANDIDATES)
+    def line(m):
+        s = "%s | %s | %s" % (m["id"], cost(m), m.get("good_at", ""))
+        if m.get("specialties"):
+            s += " SPECIALTY: %s." % ", ".join(m["specialties"])
+        return s
+
+    listing = "\n".join(line(m) for m in CANDIDATES)
     body = json.dumps({
         # The cheap models worth using here are reasoning models, and a routing
         # decision does not need reasoning. Left on, the whole max_tokens budget

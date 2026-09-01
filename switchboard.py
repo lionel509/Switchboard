@@ -64,6 +64,9 @@ def cmd_list(args):
             warn = "  ⚠ no ZDR" if m.get("zdr", True) is False else ""
             print("  %-9s %-34s %-18s %s%s"
                   % (m.get("tier", "?"), m["id"], cost, m.get("name", ""), warn))
+            if m.get("specialties"):
+                print("  %-9s %s★ %s%s" % ("", " " * 34, ", ".join(m["specialties"]),
+                                           "  (%s)" % m["source"] if m.get("source") else ""))
         print()
     return 0
 
@@ -113,6 +116,10 @@ def cmd_add(args):
              "price": price,
              "context": m.get("context_length"),
              "good_at": args.good_at or ""}
+    if args.specialty:
+        entry["specialties"] = args.specialty
+    if args.source:
+        entry["source"] = args.source
     if args.no_zdr:
         entry["zdr"] = False
     cat["models"].append(entry)
@@ -165,6 +172,11 @@ def main():
     a.add_argument("--family", help="e.g. gemini, deepseek")
     a.add_argument("--tier", help="e.g. flash, pro")
     a.add_argument("--good-at", help="what it is for — fed to Auto's router model")
+    a.add_argument("--specialty", action="append", metavar="TAG",
+                   help="a measured strength, e.g. --specialty frontend. Repeatable. "
+                        "Specialties outrank tier and price when Auto routes, so add "
+                        "one only for a strength you can point at evidence for.")
+    a.add_argument("--source", help="where a specialty claim came from, e.g. a benchmark")
     a.add_argument("--no-zdr", action="store_true",
                    help="model has no zero-data-retention provider")
     a.add_argument("--subscription", action="store_true",
