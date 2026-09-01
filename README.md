@@ -50,6 +50,38 @@ Two transforms make non-Claude models work at all:
 Each request appends one JSON object to `requests.log` — upstream, model requested vs. model
 actually served, latency, tokens, and cost when reported.
 
+## Auto
+
+An extra picker entry, **"Auto — cheap first, escalates"**. Select it for a session of mundane
+work: cheap turns go to a cheap provider, and anything that looks like real work escalates and
+*stays* escalated.
+
+```
+{"model_requested": "~google/gemini-flash-latest", "auto_from": "~auto/auto",
+ "model_used": "google/gemini-3.7-flash", "cost": 6.2e-05}
+```
+
+Two design decisions, both load-bearing:
+
+**The decision is made once per conversation, not per request, and never downgrades.** Claude
+Code's system prompt plus tool schemas is large — a real turn in this repo's own session logged
+`"cache_read": 71346`. Cached, those 71k tokens are nearly free on every turn after the first.
+Switching providers is a **full cache miss at full input price**, so a router that re-decides
+each turn can lose more on cache misses than it saves on cheap tokens. Auto pins its choice to a
+conversation key derived from the opening turn, and escalation is one-way.
+
+**Escalation triggers are structural, not semantic.** No classifier model, because "is this
+question hard" is not knowable from the first message. What *is* knowable is whether the session
+has become real work: more than 3 tools offered, more than 6 messages deep, or a prompt past
+`CLAUDE_ROUTER_AUTO_CHARS`.
+
+> [!note]
+> **On a subscription, this saves quota rather than money.** Anthropic models are already paid
+> for and free at the margin; OpenRouter models cost real cents. Auto is worth it because
+> mundane turns stop burning Claude rate limit you would rather spend on real work — not
+> because it is cheaper. That is also why `CLAUDE_ROUTER_AUTO_STRONG` defaults to an Anthropic
+> model: there is no reason to pay OpenRouter for the hard turns.
+
 ## How it works
 
 Claude Code *does* support gateway models in the picker, via
@@ -131,6 +163,9 @@ Then `exec zsh`, launch `claude`, and **restart it once more** so the picker rea
 | `CLAUDE_ROUTER_MODELS` | `grok` | substrings of OpenRouter ids to surface |
 | `CLAUDE_ROUTER_PORT` | `8787` | listen port |
 | `CLAUDE_ROUTER_LOG` | `~/.local/share/claude-router/requests.log` | request log path |
+| `CLAUDE_ROUTER_AUTO_CHEAP` | `~google/gemini-flash-latest` | what Auto uses for mundane turns |
+| `CLAUDE_ROUTER_AUTO_STRONG` | `claude-sonnet-5` | what Auto escalates to |
+| `CLAUDE_ROUTER_AUTO_CHARS` | `24000` | prompt size that forces escalation |
 
 ## Troubleshooting
 

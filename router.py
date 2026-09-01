@@ -8,7 +8,7 @@
 
 Nothing is stored. The subscription token is forwarded, never read or written.
 """
-import http.client, json, os, sys, time
+import hashlib, http.client, json, os, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -17,6 +17,27 @@ LOGFILE  = os.path.expanduser(os.environ.get(
     "CLAUDE_ROUTER_LOG", "~/.local/share/claude-router/requests.log"))
 # substrings of OpenRouter model ids to surface in /model
 SURFACE  = [s for s in os.environ.get("CLAUDE_ROUTER_MODELS", "grok").split(",") if s]
+
+# --- Auto ------------------------------------------------------------------
+# A pseudo-model in the picker. Pick it for a session of mundane work and cheap
+# turns go to a cheap provider, protecting Claude quota; anything that looks
+# like real work escalates and stays escalated.
+#
+# The decision is made ONCE PER CONVERSATION, not per request, and is one-way.
+# Reason: Claude Code's system prompt + tool schemas is 10-25k tokens, and
+# prompt caching makes turn 2+ nearly free. Every provider switch is a full
+# cache miss at full input price, so a per-request router loses money on cache
+# misses faster than it saves it on cheap tokens.
+AUTO_MODEL  = "~auto/auto"
+AUTO_CHEAP  = os.environ.get("CLAUDE_ROUTER_AUTO_CHEAP", "~google/gemini-flash-latest")
+# Escalation target defaults to Anthropic: on a subscription it is free at the
+# margin, so there is no reason to pay OpenRouter for the hard turns.
+AUTO_STRONG = os.environ.get("CLAUDE_ROUTER_AUTO_STRONG", "claude-sonnet-5")
+# Escalate above this many characters of serialised prompt (~4 chars/token).
+AUTO_ESCALATE_CHARS = int(os.environ.get("CLAUDE_ROUTER_AUTO_CHARS", "24000"))
+
+_auto_pins = {}                 # conversation key -> resolved model id
+_auto_lock = threading.Lock()
 
 HOP = {"connection", "keep-alive", "transfer-encoding", "upgrade",
        "proxy-authenticate", "proxy-authorization", "te", "trailers"}
@@ -102,6 +123,52 @@ def prefs_for(model):
     return DEFAULT_PREFS
 
 
+def conv_key(req):
+    """Stable id for a conversation, from its opening turn.
+
+    Requests carry no session id, but the first user message and the head of the
+    system prompt are fixed for the life of a conversation and differ between
+    them. Good enough to pin a routing decision to.
+    """
+    msgs = req.get("messages") or []
+    first = json.dumps(msgs[0], sort_keys=True) if msgs else ""
+    system = req.get("system")
+    if isinstance(system, list):
+        system = json.dumps(system[:1], sort_keys=True)
+    return hashlib.sha256((str(system)[:2000] + first[:2000]).encode()).hexdigest()[:16]
+
+
+def looks_hard(req):
+    """Escalation signals available in the request itself. No classifier model.
+
+    Deliberately not 'is this question difficult' — that is unknowable from the
+    first message. These are proxies for *the session has become real work*.
+    """
+    if len(req.get("tools") or []) > 3:
+        return "tools"
+    if len(req.get("messages") or []) > 6:
+        return "depth"
+    if len(json.dumps(req.get("messages") or [])) > AUTO_ESCALATE_CHARS:
+        return "context"
+    return None
+
+
+def resolve_auto(req):
+    """Map the auto pseudo-model onto a real one. One-way: never downgrades."""
+    key = conv_key(req)
+    with _auto_lock:
+        pinned = _auto_pins.get(key)
+        if pinned == AUTO_STRONG:
+            return AUTO_STRONG           # escalation is permanent for this conversation
+        why = looks_hard(req)
+        chosen = AUTO_STRONG if why else (pinned or AUTO_CHEAP)
+        _auto_pins[key] = chosen
+        if len(_auto_pins) > 512:        # bounded; oldest insertions drop first
+            for k in list(_auto_pins)[:128]:
+                _auto_pins.pop(k, None)
+    return chosen
+
+
 def or_key():
     try:
         with open(KEYFILE) as f:
@@ -140,12 +207,18 @@ class Router(BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length") or 0)
         body = self.rfile.read(n) if n else b""
 
-        model = ""
+        model = requested = ""
         if body:
             try:
-                model = json.loads(body).get("model", "") or ""
+                req = json.loads(body)
             except Exception:
-                pass
+                req = None
+            if req is not None:
+                model = requested = req.get("model", "") or ""
+                if requested == AUTO_MODEL:
+                    model = resolve_auto(req)
+                    req["model"] = model
+                    body = json.dumps(req).encode()
 
         target = upstream_for(model)
         if target == "openrouter":
@@ -155,13 +228,18 @@ class Router(BaseHTTPRequestHandler):
             host, path = "openrouter.ai", "/api" + self.path
             headers = self.headers_for_openrouter(key)
             body = sanitize(body)
-            headers["Content-Length"] = str(len(body))
         else:
             host, path = "api.anthropic.com", self.path
             headers = self.headers_passthrough()
+        if body:
+            # The body may have been rewritten (auto) or trimmed (sanitize), so
+            # the client's Content-Length can no longer be trusted on either path.
+            for k in [k for k in headers if k.lower() == "content-length"]:
+                del headers[k]
+            headers["Content-Length"] = str(len(body))
 
         self.relay("POST" if body else self.command, host, path, headers, body,
-                   model=model, upstream=target)
+                   model=model, upstream=target, requested=requested)
 
     def headers_passthrough(self):
         """Everything the client sent, minus hop-by-hop. Credential untouched."""
@@ -177,10 +255,13 @@ class Router(BaseHTTPRequestHandler):
         h["Authorization"] = "Bearer " + key
         return h
 
-    def relay(self, method, host, path, headers, body, model="", upstream=""):
+    def relay(self, method, host, path, headers, body, model="", upstream="",
+              requested=""):
         t0 = time.time()
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": upstream,
                "model_requested": model}
+        if requested and requested != model:
+            rec["auto_from"] = requested        # picker said auto; we chose model
         try:
             conn = http.client.HTTPSConnection(host, timeout=900)
             conn.request(method, path, body=body, headers=headers)
@@ -274,6 +355,10 @@ class Router(BaseHTTPRequestHandler):
                 c.close()
             except Exception as e:
                 self.log_message("openrouter model list failed: %s", e)
+
+        out.append({"type": "model", "id": AUTO_MODEL,
+                    "display_name": "Auto — cheap first, escalates",
+                    "created_at": "2026-01-01T00:00:00Z"})
 
         payload = json.dumps({"data": out, "has_more": False}).encode()
         self.send_response(200)
