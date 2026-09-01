@@ -10,10 +10,20 @@
     "grok": "xAI Grok",
     "glm": "Z.ai GLM"
   },
-  "_picker_note": "Two ways to shorten the /model menu. (1) 'picker' below drives gateway discovery: family rows collapse variants and pick a tier per task. (2) 'switchboard.py picker --apply' writes a modelPicker lineup into ~/.claude/settings.json with replaceBuiltInOptions, which replaces the WHOLE menu — so you can drop Claude rows you never use and list every variant explicitly instead. Either way, Auto still routes across the full 'models' list. The menu shows 10 rows before collapsing the rest behind '… +N models'.",
+  "_picker_note": "Gateway rows are published after the six built-in Claude rows and the custom arrow row, so roughly the first three land above the fold and the rest sit past '… +N models'. That overflow IS the second page: the picker scrolls, and it has a search, so anything down there is still one keystroke away. Order this list by how often each is picked by hand — Auto is always first.",
   "picker": {
     "families": [],
-    "models": []
+    "models": [
+      "~deepseek/deepseek-v4-flash-latest",
+      "~google/gemini-flash-latest",
+      "qwen/qwen3.8-flash",
+      "~x-ai/grok-latest",
+      "deepseek/deepseek-v4-pro",
+      "~google/gemini-pro-latest",
+      "~z-ai/glm-latest",
+      "moonshotai/kimi-k3",
+      "openrouter/auto"
+    ]
   },
   "_claude_rows_note": "Used only by 'picker --apply'. These are the built-in Claude rows worth keeping when the lineup is replaced; drop or reorder freely. Aliases work ('sonnet', 'opus[1m]').",
   "claude_rows": [

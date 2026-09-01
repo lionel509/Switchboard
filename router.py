@@ -434,7 +434,10 @@ def picker_rows():
     Everything in the catalog stays available to Auto whether it is listed here
     or not — this only controls how long the menu is.
     """
-    rows = []
+    # Auto leads: gateway rows land after the six built-in Claude rows and the
+    # custom arrow row, so only the first few sit above the fold. Everything
+    # after row ten is still reachable — the picker scrolls, and it has a search.
+    rows = [{"id": AUTO_MODEL, "display_name": "Auto — routed per task"}]
     for fam in PICKER.get("families", []):
         members = family_of(fam)
         if not members:
@@ -457,7 +460,6 @@ def picker_rows():
         if m.get("zdr", True) is False:
             label += " (no ZDR)"
         rows.append({"id": mid, "display_name": label})
-    rows.append({"id": AUTO_MODEL, "display_name": "Auto — routed per task"})
     return rows
 
 
