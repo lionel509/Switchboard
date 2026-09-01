@@ -142,6 +142,39 @@ DeepSeek Flash — and the picker lists them as siblings. Claude Code's picker i
 no submenus, so this is naming convention rather than nesting, but it reads the same way and Auto
 uses `tier` and `price` when choosing.
 
+### Keeping the menu short
+
+Claude Code always shows its own six Claude rows, and past ten the picker starts hiding the rest
+behind a `… +N models` line. One row per model variant overflows it immediately.
+
+So the picker publishes **family rows**. `~fam/deepseek` is one entry, "DeepSeek (flash/pro)",
+and it resolves its own tier per task the same way Auto does — restricted to that family:
+
+```
+ 7. DeepSeek (flash/pro)      From gateway
+ 8. Google Gemini (flash/pro) From gateway
+ 9. Kimi K3                   From gateway
+10. Auto — routed per task    From gateway
+```
+
+| Row | Task | Resolves to |
+|---|---|---|
+| DeepSeek | rename all `.txt` files | `~deepseek/deepseek-v4-flash-latest` |
+| DeepSeek | prove this bound is tight | `deepseek/deepseek-v4-pro` |
+| Gemini | summarise this paragraph | `~google/gemini-flash-latest` |
+| Gemini | read three 200-page PDFs | `~google/gemini-pro-latest` |
+
+`picker.families` and `picker.models` in `models.json` control **only menu length**. Everything in
+the catalog stays available to Auto whether it is listed or not — Qwen, Grok and GLM are all still
+routable while not taking up a row.
+
+> [!note]
+> **There is no arrow-key variant switch.** The `←/→ to adjust` on the effort line is Claude
+> Code's own UI; a gateway model is `{id, display_name}` in a cache file and cannot hook key
+> events or carry variants behind a row. Family rows are the closest available thing: one row,
+> and the tier chosen per task rather than by keypress. To force one exact variant, launch with
+> `--model deepseek/deepseek-v4-pro`.
+
 ### Specialties
 
 A `specialties` list is a **measured** strength, and it is the highest-priority rule when Auto

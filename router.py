@@ -237,9 +237,11 @@ Task:
 Model id:"""
 
 
-def ask_router_model(task):
+def ask_router_model(task, cands=None):
     """One cheap call to name the best model for this task. None on any failure."""
-    if not ROUTER_MODEL or not CANDIDATES or not task:
+    if cands is None:
+        cands = CANDIDATES
+    if not ROUTER_MODEL or not cands or not task:
         return None
     key = or_key()
     if not key:
@@ -256,7 +258,7 @@ def ask_router_model(task):
             s += " SPECIALTY: %s." % ", ".join(m["specialties"])
         return s
 
-    listing = "\n".join(line(m) for m in CANDIDATES)
+    listing = "\n".join(line(m) for m in cands)
     body = json.dumps({
         # The cheap models worth using here are reasoning models, and a routing
         # decision does not need reasoning. Left on, the whole max_tokens budget
@@ -285,7 +287,7 @@ def ask_router_model(task):
     # display name. Longest id first so a short id cannot shadow a longer one.
     # Thinking text is included for when the budget ran out before any text.
     flat = text.replace("~", "").lower()
-    cands = sorted(CANDIDATES, key=lambda x: -len(x["id"]))
+    cands = sorted(cands, key=lambda x: -len(x["id"]))
     for m in cands:                                  # full id
         if m["id"].replace("~", "").lower() in flat:
             return m["id"]
@@ -320,6 +322,72 @@ def resolve_auto(req):
             for k in list(_auto_pins)[:128]:
                 _auto_pins.pop(k, None)
     return chosen
+
+
+FAMILY_PREFIX = "~fam/"
+FAMILY_LABELS = CATALOG.get("family_labels", {})
+PICKER         = CATALOG.get("picker", {})
+
+
+def family_of(fam):
+    """Catalog entries in one family, cheapest first."""
+    return sorted([m for m in CANDIDATES if m.get("family") == fam],
+                  key=lambda m: (m.get("price") or [0])[0])
+
+
+def resolve_family(req, fam):
+    """One picker row per family; the tier is chosen per task.
+
+    Claude Code's picker cannot put variants behind a row — the arrow-key adjust
+    on the effort line is its own UI, not something a gateway entry can hook. So
+    a family row resolves its own tier the way Auto does, restricted to that
+    family, and the list stays one row per family instead of one per variant.
+    """
+    cands = family_of(fam)
+    if not cands:
+        return FALLBACK
+    key = conv_key(req) + ":" + fam
+    with _auto_lock:
+        pinned = _auto_pins.get(key)
+    # On failure take the family's top tier rather than its cheapest: the family
+    # was chosen deliberately, so erring toward capable beats erring toward cheap.
+    chosen = pinned or ask_router_model(task_text(req), cands) or cands[-1]["id"]
+    with _auto_lock:
+        _auto_pins[key] = chosen
+    return chosen
+
+
+def picker_rows():
+    """What to publish to /model. Families collapse; the rest is opt-in.
+
+    Everything in the catalog stays available to Auto whether it is listed here
+    or not — this only controls how long the menu is.
+    """
+    rows = []
+    for fam in PICKER.get("families", []):
+        members = family_of(fam)
+        if not members:
+            continue
+        label = FAMILY_LABELS.get(fam, fam.title())
+        seen, order = set(), []                   # dedupe, keep cheapest-first
+        for m in members:
+            t = m.get("tier", "?")
+            if t not in seen:
+                seen.add(t)
+                order.append(t)
+        tiers = "/".join(order)
+        rows.append({"id": FAMILY_PREFIX + fam,
+                     "display_name": "%s (%s)" % (label, tiers)})
+    for mid in PICKER.get("models", []):
+        m = BY_ID.get(mid)
+        if not m or "/" not in mid:
+            continue
+        label = m.get("name") or mid
+        if m.get("zdr", True) is False:
+            label += " (no ZDR)"
+        rows.append({"id": mid, "display_name": label})
+    rows.append({"id": AUTO_MODEL, "display_name": "Auto — routed per task"})
+    return rows
 
 
 def or_key():
@@ -370,6 +438,9 @@ class Router(BaseHTTPRequestHandler):
                 model = requested = req.get("model", "") or ""
                 if requested == AUTO_MODEL:
                     model = resolve_auto(req)
+                elif requested.startswith(FAMILY_PREFIX):
+                    model = resolve_family(req, requested[len(FAMILY_PREFIX):])
+                if model != requested:
                     req["model"] = model
                     body = json.dumps(req).encode()
 
@@ -491,17 +562,11 @@ class Router(BaseHTTPRequestHandler):
             self.log_message("anthropic model list failed: %s", e)
 
         if CANDIDATES:
-            for m in CANDIDATES:
-                # Bare ids are Anthropic's own and already in the picker natively;
-                # publishing them again would duplicate every Claude entry. They
-                # stay in the catalog because Auto still picks between them.
-                if "/" not in m["id"]:
-                    continue
-                label = m.get("name") or m["id"]
-                if m.get("zdr", True) is False:
-                    label += " (no ZDR)"      # the disclaimer, where it is seen
-                out.append({"type": "model", "id": m["id"], "display_name": label,
-                            "created_at": "2026-01-01T00:00:00Z"})
+            # Bare Anthropic ids are never published — Claude Code lists them
+            # natively and a second copy would duplicate every Claude row.
+            for r in picker_rows():
+                out.append(dict(r, type="model",
+                                created_at="2026-01-01T00:00:00Z"))
         elif or_key():
             # No catalog: fall back to the old substring filter over OpenRouter.
             try:

@@ -34,22 +34,16 @@ def fetch():
     """Prefer models.json — it needs no network and works before the router has
     been restarted onto a new catalog. Fall back to asking a running router."""
     try:
-        with open(CATALOG) as f:
-            cat = json.load(f)
-        out = []
-        for m in cat.get("models", []):
-            # Bare ids are Anthropic's own, already in the picker natively. They
-            # stay in the catalog because Auto picks between them, but publishing
-            # them here would duplicate every Claude entry.
-            if not m.get("id") or "/" not in m["id"]:
-                continue
-            label = m.get("name") or m["id"]
-            if m.get("zdr", True) is False:
-                label += " (no ZDR)"
-            out.append({"id": m["id"], "display_name": label})
-        if out:
-            out.append({"id": "~auto/auto", "display_name": "Auto — routed per task"})
-            return out
+        # Import rather than reimplement: the picker menu must match exactly what
+        # the router will actually serve, and two copies of this would drift.
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "_sb_router", os.path.join(os.path.dirname(CATALOG), "router.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        rows = mod.picker_rows()
+        if rows:
+            return rows
     except Exception:
         pass
 

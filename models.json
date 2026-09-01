@@ -2,6 +2,24 @@
   "_comment": "Edit with switchboard.py (add/remove/list), or by hand. Prices are USD per 1M tokens, in/out, recorded when the entry was added — they drift, so treat them as ordering, not billing. 'good_at' is fed verbatim to the router model when Auto picks.",
   "router_model": "~deepseek/deepseek-v4-flash-latest",
   "fallback": "claude-sonnet-5",
+  "family_labels": {
+    "deepseek": "DeepSeek",
+    "gemini": "Google Gemini",
+    "kimi": "Kimi",
+    "qwen": "Qwen",
+    "grok": "xAI Grok",
+    "glm": "Z.ai GLM"
+  },
+  "_picker_note": "Controls ONLY how long the /model menu is. Everything in 'models' stays available to Auto whether listed here or not. A family row collapses its variants into one entry and picks the tier per task, because Claude Code's picker cannot put variants behind a row. Six Claude rows are always present, so keeping this to four keeps the menu at ten with no overflow.",
+  "picker": {
+    "families": [
+      "deepseek",
+      "gemini"
+    ],
+    "models": [
+      "moonshotai/kimi-k3"
+    ]
+  },
   "models": [
     {
       "id": "claude-haiku-4-5-20251001",
@@ -126,18 +144,6 @@
       ],
       "context": 200000,
       "good_at": "agentic tool use and coding at mid price."
-    },
-    {
-      "id": "~moonshotai/kimi-latest",
-      "name": "MoonshotAI Kimi",
-      "family": "kimi",
-      "tier": "pro",
-      "price": [
-        2.55,
-        12.75
-      ],
-      "context": 256000,
-      "good_at": "long-context reading and writing, research summarisation."
     },
     {
       "id": "moonshotai/kimi-k3",
