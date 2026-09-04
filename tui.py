@@ -33,6 +33,7 @@ GREEN, RED, YELLOW = 114, 203, 179
 DIM, FAINT = 245, 240
 
 ROLES = {}          # role -> attr, filled by init_colors()
+_DIRTY = [False]    # module-level so the Ctrl-C handler can see it
 
 
 def init_colors():
@@ -245,89 +246,179 @@ class UI(object):
 
     # ---------- drawing ----------
 
-    def put(self, y, x, text, a=0):
+    def put(self, y, x, text, a=0, right=None):
+        """Draw clipped to the screen and, when given, to a panel's right edge.
+
+        Without `right` a long row runs straight through the panel border and into
+        whatever is drawn beside it -- which is exactly what the model list did to
+        the detail pane.
+        """
         h, w = self.scr.getmaxyx()
-        if y < 0 or y >= h or x >= w - 1:
+        limit = w - 1 if right is None else min(w - 1, right)
+        if y < 0 or y >= h or x >= limit:
             return x
         try:
-            self.scr.addnstr(y, x, text, max(0, w - x - 1), a)
+            self.scr.addnstr(y, x, text, max(0, limit - x), a)
         except curses.error:
             pass
         return x + len(text)
 
-    def putsegs(self, y, x, segs, force=None):
+    def putsegs(self, y, x, segs, force=None, right=None):
         for text, role in segs:
             if not text:
                 continue
-            x = self.put(y, x, text, attr(force or role))
+            x = self.put(y, x, text, attr(force or role), right)
+            if right is not None and x >= right:
+                break
         return x
+
+    def box(self, top, left, height, width, title, active):
+        """A rounded panel. The active one gets the accent border."""
+        a = attr("sel" if active else "rule")
+        if height < 2 or width < 4:
+            return
+        self.put(top, left, "\u256d" + "\u2500" * (width - 2) + "\u256e", a)
+        if title:
+            self.put(top, left + 2, " " + title + " ", attr("title" if active else "head"))
+        for y in range(top + 1, top + height - 1):
+            self.put(y, left, "\u2502", a)
+            self.put(y, left + width - 1, "\u2502", a)
+        self.put(top + height - 1, left,
+                 "\u2570" + "\u2500" * (width - 2) + "\u256f", a)
+
+    def wrap(self, text, width):
+        out, line = [], ""
+        for word in str(text).split():
+            if len(line) + len(word) + 1 > width:
+                if line:
+                    out.append(line)
+                line = word
+            else:
+                line = (line + " " + word).strip()
+        if line:
+            out.append(line)
+        return out
 
     def draw(self):
         self.scr.erase()
         h, w = self.scr.getmaxyx()
+        _DIRTY[0] = self.dirty
 
-        self.put(0, 2, "Switchboard", attr("title"))
-        meta = "router %s   fallback %s" % (short(self.cat.get("router_model", "?"), 26),
-                                            short(self.cat.get("fallback", "?"), 20))
+        # Detail pane only when there is room for it; below that, list only.
+        det_w = 0
+        if w >= 92:
+            det_w = max(30, min(40, w // 3))
+        list_w = w - det_w - (1 if det_w else 0)
+        panel_h = h - 2                      # leave the footer row + a gap
+
+        title = "Switchboard"
         if self.dirty:
-            self.put(0, 15, "unsaved", attr("warn"))
-        if w > len(meta) + 26:
-            self.put(0, w - len(meta) - 3, meta, attr("meta"))
-        self.put(1, 2, "─" * max(0, w - 5), attr("rule"))
+            title += "  \u2022 unsaved"
+        self.box(0, 0, panel_h, list_w, title, True)
 
-        body_top, body_h = 2, h - 4
+        inner_h = panel_h - 2
         if self.sel < self.top:
             self.top = self.sel
-        if self.sel >= self.top + body_h:
-            self.top = self.sel - body_h + 1
+        if self.sel >= self.top + inner_h:
+            self.top = self.sel - inner_h + 1
 
-        y = body_top
-        for i in range(self.top, min(len(self.rows), self.top + body_h)):
+        y = 1
+        for i in range(self.top, min(len(self.rows), self.top + inner_h)):
             kind, payload = self.rows[i]
             cur = (i == self.sel)
-            if cur:
-                self.put(y, 1, "▌", attr("sel"))
+            self.put(y, 1, "\u258c" if cur else " ", attr("sel"))
+            x, edge = 3, list_w - 1
             if kind == "head":
-                self.put(y, 2, payload, attr("head"))
+                self.put(y, x, payload, attr("head"), edge)
             elif kind in ("blank", "note"):
-                self.put(y, 3, payload, attr("note"))
+                self.put(y, x, payload, attr("note"), edge)
             elif kind == "up":
                 kf = payload.get("key_file") or ""
-                self.putsegs(y, 3, row_segs(kind, payload, self.cat, (),
+                self.putsegs(y, x, row_segs(kind, payload, self.cat, (),
                                             bool(self.sb.read_keyfile(kf))),
-                             force="sel" if cur else None)
+                             force="sel" if cur else None, right=edge)
             elif kind == "prov":
-                self.putsegs(y, 3, row_segs(kind, payload, self.cat, (),
+                self.putsegs(y, x, row_segs(kind, payload, self.cat, (),
                                             self.keyed(payload)),
-                             force="sel" if cur else None)
+                             force="sel" if cur else None, right=edge)
             else:
-                m = payload
-                self.putsegs(y, 3, row_segs(kind, m, self.cat, self.picker_set()),
-                             force="sel" if cur else None)
-                if cur:
-                    # Detail lines respect the same bound as the list, or they
-                    # run into the status row.
-                    ga = (m.get("good_at") or "").replace("\n", " ")
-                    extra = []
-                    if ga:
-                        extra.append([(short(ga, max(10, w - 14)), "note")])
-                    if m.get("specialties"):
-                        extra.append([("★ ", "star"),
-                                      (", ".join(m["specialties"]), "note")])
-                    for segs in extra:
-                        if y + 1 >= body_top + body_h:
-                            break
-                        y += 1
-                        self.putsegs(y, 9, segs)
+                self.putsegs(y, x, row_segs(kind, payload, self.cat,
+                                            self.picker_set()),
+                             force="sel" if cur else None, right=edge)
             y += 1
-            if y >= body_top + body_h:
-                break
 
-        self.put(h - 2, 2, short(self.status, max(0, w - 5)), attr("meta"))
-        self.footer(h - 1, w, [("↑↓", "move"), ("space", "pick"), ("enter", "edit"),
-                               ("a", "add"), ("d", "del"), ("l", "login"),
-                               ("s", "save"), ("q", "quit")])
+        # scroll position, drawn on the border so it costs no row
+        if len(self.rows) > inner_h:
+            frac = self.top / float(max(1, len(self.rows) - inner_h))
+            self.put(1 + int(frac * (inner_h - 1)), list_w - 1, "\u2503", attr("sel"))
+
+        if det_w:
+            self.detail(0, list_w + 1, panel_h, det_w)
+
+        self.footer(h - 1, w, [("\u2191\u2193", "move"), ("space", "pick"),
+                               ("enter", "edit"), ("a", "add"), ("d", "del"),
+                               ("l", "login"), ("s", "save"), ("q", "quit")])
         self.scr.refresh()
+
+    def detail(self, top, left, height, width):
+        kind, payload = self.current()
+        iw = width - 4
+        if kind == "model":
+            m = payload
+            self.box(top, left, height, width, short(m["id"], width - 6), False)
+            y = top + 2
+            pairs = [("name", m.get("name", "")), ("tier", m.get("tier", "?")),
+                     ("price", price_of(m)),
+                     ("context", "{:,}".format(m.get("context", 0))),
+                     ("upstream", m.get("upstream_id") or "same as id"),
+                     ("in picker", "yes" if m["id"] in self.picker_set()
+                      else ("n/a \u2014 native" if not publishable(m["id"]) else "no"))]
+            for k, v in pairs:
+                if y >= top + height - 1:
+                    return
+                self.put(y, left + 2, pad(k, 11), attr("tier"))
+                self.put(y, left + 13, short(v, iw - 11), attr("name"), left + width - 1)
+                y += 1
+            if m.get("specialties") and y < top + height - 2:
+                y += 1
+                self.put(y, left + 2, "\u2605 ", attr("star"))
+                self.put(y, left + 4, short(", ".join(m["specialties"]), iw - 2),
+                         attr("name"), left + width - 1)
+                y += 1
+            if m.get("good_at") and y < top + height - 2:
+                y += 1
+                self.put(y, left + 2, "GOOD AT", attr("head"))
+                y += 1
+                for line in self.wrap(m["good_at"], iw):
+                    if y >= top + height - 1:
+                        break
+                    self.put(y, left + 2, line, attr("note"), left + width - 1)
+                    y += 1
+        elif kind in ("prov", "up"):
+            name = payload if kind == "prov" else payload.get("label", payload["name"])
+            src = (self.cat["providers"][payload] if kind == "prov" else payload)
+            self.box(top, left, height, width, name, False)
+            y = top + 2
+            for k, v in (("host", src.get("host", "?")),
+                         ("path", src.get("path_prefix") or "/"),
+                         ("key file", src.get("key_file") or "\u2014"),
+                         ("auth", src.get("auth_header") or "\u2014"),
+                         ("oauth", "yes" if src.get("oauth") else "no")):
+                if y >= top + height - 1:
+                    return
+                self.put(y, left + 2, pad(k, 11), attr("tier"))
+                self.put(y, left + 13, short(v, iw - 11), attr("name"), left + width - 1)
+                y += 1
+            note = src.get("detail") or src.get("note") or src.get("console_hint")
+            if note and y < top + height - 2:
+                y += 1
+                for line in self.wrap(note, iw):
+                    if y >= top + height - 1:
+                        break
+                    self.put(y, left + 2, line, attr("note"), left + width - 1)
+                    y += 1
+        else:
+            self.box(top, left, height, width, "", False)
 
     def footer(self, y, w, pairs):
         x = 2
@@ -553,6 +644,30 @@ class UI(object):
             self.scr.refresh()
         self.status = "back from %s sign-in" % u["name"]
 
+    def on_mouse(self):
+        """Click a row to select it; wheel scrolls. Clicking the marker toggles."""
+        try:
+            _id, mx, my, _z, bstate = curses.getmouse()
+        except curses.error:
+            return
+        up = getattr(curses, "BUTTON4_PRESSED", 0)
+        down = getattr(curses, "BUTTON5_PRESSED", 0)
+        if up and (bstate & up):
+            self.move(-1)
+            return
+        if down and (bstate & down):
+            self.move(1)
+            return
+        idx = self.top + (my - 1)            # row 0 is the panel border
+        if 0 <= idx < len(self.rows) and self.selectable(idx):
+            same = (idx == self.sel)
+            self.sel = idx
+            kind, payload = self.rows[idx]
+            # A second click on an already-selected model row toggles the pick,
+            # which is what the checkbox looks like it should do.
+            if same and kind == "model" and mx <= 6:
+                self.toggle_pick(payload)
+
     def save(self):
         self.sb.save(self.cat)
         self.dirty = False
@@ -569,6 +684,16 @@ class UI(object):
         except (AttributeError, curses.error):
             pass
         init_colors()
+        # Wheel-down (BUTTON5) is absent from some ncurses builds -- macOS's among
+        # them -- so every constant is looked up rather than assumed.
+        mask = 0
+        for nm in ("BUTTON1_CLICKED", "BUTTON1_PRESSED", "BUTTON4_PRESSED",
+                   "BUTTON5_PRESSED"):
+            mask |= getattr(curses, nm, 0)
+        try:
+            curses.mousemask(mask)
+        except curses.error:
+            pass
         if not any(self.selectable(i) for i in range(len(self.rows))):
             return 0
         if not self.selectable(self.sel):
@@ -582,6 +707,9 @@ class UI(object):
             elif c in (curses.KEY_DOWN, ord("j")):
                 self.move(1)
             elif c == curses.KEY_RESIZE:
+                continue
+            elif c == curses.KEY_MOUSE:
+                self.on_mouse()
                 continue
             elif c == ord(" ") and kind == "model":
                 self.toggle_pick(payload)
@@ -617,4 +745,10 @@ def run(sb):
         print("the editor needs a terminal; use the subcommands instead "
               "(switchboard --help)", file=sys.stderr)
         return 1
-    return curses.wrapper(lambda scr: UI(sb, scr).loop())
+    try:
+        return curses.wrapper(lambda scr: UI(sb, scr).loop())
+    except KeyboardInterrupt:
+        # curses.wrapper has already restored the terminal by here. Ctrl-C is a
+        # normal way to leave a full-screen app; a traceback is not an answer.
+        print("interrupted — nothing saved" if _DIRTY[0] else "bye")
+        return 130

@@ -282,19 +282,24 @@ everything it does — this exists because their equivalents are long: `add` car
 flags, and putting a model in the picker is three chained commands.
 
 ```
- Switchboard                        router: deepseek-flash   fallback: claude-sonnet-5
- PROVIDERS
-   kimi       api.kimi.com/coding            -- no key     oauth
- MODELS
-   -  claude-opus-5                      opus    claude quota    Claude Opus
-  [x] ~deepseek/deepseek-v4-flash-latest flash   $0.05/$0.16     DeepSeek Flash
-  [x] kimi/k3                            pro     kimi quota      Kimi K3 (sub)
-      good at: building user interfaces - React, CSS, layout, data visualisation
-      * frontend, ui, css, react
- up/dn move  space pick  enter edit  a add  d del  l login  s save+sync  q quit
+╭─ Switchboard ──────────────────────────────────────────╮ ╭─ kimi/k3 ─────────────────╮
+│  PROVIDERS                                             │ │                           │
+│  Claude     api.anthropic.com      —  via Claude Code  │ │ name       Kimi K3 (sub)  │
+│▌ OpenRouter openrouter.ai          ●  signed in        │ │ tier       pro            │
+│  kimi       api.kimi.com/coding    ●  signed in  oauth │ │ price      kimi quota     │
+│                                                        │ │ context    262,144        │
+│  MODELS                                                │ │ in picker  yes            │
+│  ·  claude-opus-5          opus   claude quota  Opus   │ │                           │
+│  ●  ~deepseek/…-flash      flash  $0.05/$0.16   Flash  │ │ ★ frontend, ui, css       │
+│  ●  kimi/k3                pro    kimi quota    K3     │ │                           │
+│  ○  openrouter/auto        auto   varies        Auto   │ │ GOOD AT                   │
+│                                                        │ │ building user interfaces  │
+╰────────────────────────────────────────────────────────╯ ╰───────────────────────────╯
+ ↑↓ move · space pick · enter edit · a add · d del · l login · s save · q quit
 ```
 
-`space` toggles a picker row, `enter` opens a field editor (name, blurb, tier, good-at,
+Mouse works: click a row to select it, click an already-selected model's marker to toggle
+it, wheel to scroll. `space` toggles a picker row, `enter` opens a field editor (name, blurb, tier, good-at,
 specialties, evidence), `l` or `enter` on a provider runs the sign-in flow, and `s` writes
 `models.json` and syncs. Quitting with unsaved edits asks first. curses from the standard
 library, so the repo stays dependency-free.
@@ -306,7 +311,12 @@ library, so the repo stays dependency-free.
 > edits on a keystroke the user believes is "move down". `q` quits; `ESC` only backs out of
 > an overlay or cancels a prompt.
 
-Claude rows show `-` rather than a checkbox — they are already in the picker natively, and
+`PROVIDERS` lists every credential path the router can take, from `upstreams` in
+`models.json` plus the vendor-direct `providers`. That key is display-only — the router
+never reads it — so rows can be added as more get wired up. Claude's row is not selectable:
+its credential is forwarded from Claude Code and never stored here.
+
+Claude model rows show `·` rather than a marker — they are already in the picker natively, and
 publishing them again would duplicate every Claude row, so the editor refuses the toggle.
 
 ## Models
