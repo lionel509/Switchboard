@@ -6,13 +6,14 @@
     switchboard.py add qwen/qwen3.8-flash --no-zdr --good-at "cheap agentic coding"
     switchboard.py remove qwen/qwen3.8-flash
     switchboard.py sync
-    switchboard.py login kimi
+    switchboard.py login            # pick from a list, open the key page
+    switchboard.py login --all      # is every provider actually signed in?
 
 `add` looks the id up on OpenRouter and fills in name, price and context itself,
 so the catalog cannot drift into models that do not exist. Restart the router and
 re-run `sync` for a change to reach the picker.
 """
-import argparse, getpass, json, os, re, sys, urllib.error, urllib.request
+import argparse, getpass, json, os, re, shutil, subprocess, sys, urllib.error, urllib.request
 
 HERE    = os.path.dirname(os.path.abspath(__file__))
 CATALOG = os.path.join(HERE, "models.json")
@@ -368,6 +369,159 @@ def read_keyfile(path):
         return None
 
 
+def mask(key):
+    """Enough of a key to recognise it, never enough to use it."""
+    k = key.strip()
+    if len(k) <= 12:
+        return "*" * len(k)
+    return k[:6] + "…" + k[-4:]
+
+
+def clipboard():
+    """The system clipboard as text, or None where there is no clipboard tool."""
+    for cmd in (["pbpaste"], ["wl-paste", "-n"], ["xclip", "-selection", "clipboard", "-o"]):
+        if shutil.which(cmd[0]):
+            try:
+                out = subprocess.run(cmd, capture_output=True, timeout=5)
+            except Exception:
+                return None
+            if out.returncode == 0:
+                return out.stdout.decode("utf-8", "replace").strip()
+            return None
+    return None
+
+
+def open_url(url):
+    """Hand a URL to the desktop browser. False if there is no opener."""
+    for cmd in ("open", "xdg-open"):
+        if shutil.which(cmd):
+            try:
+                subprocess.run([cmd, url], capture_output=True, timeout=10)
+                return True
+            except Exception:
+                return False
+    return False
+
+
+def provider_rows(cat):
+    """Every declared provider with whether its key is actually stored."""
+    rows = []
+    for name, p in sorted(cat.get("providers", {}).items()):
+        rows.append((name, p, bool(read_keyfile(p.get("key_file", "")))))
+    return rows
+
+
+def pick_provider(cat):
+    """Choose a provider when the command line did not name one.
+
+    `login` with no argument used to be an error listing the valid names, which
+    is the same information one keystroke later than it is useful. The names are
+    not memorable and the set is small, so show them with their key status and
+    take a number.
+    """
+    rows = provider_rows(cat)
+    if not rows:
+        print("no providers declared under 'providers' in models.json", file=sys.stderr)
+        return None
+    if len(rows) == 1:
+        return rows[0][0]
+    print("Outside subscriptions:")
+    for i, (name, p, has) in enumerate(rows, 1):
+        print("  %d. %-8s %-28s %s"
+              % (i, name, p.get("host", "?") + p.get("path_prefix", ""),
+                 "✓ signed in" if has else "✗ no key"))
+    try:
+        raw = input("which: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\naborted", file=sys.stderr)
+        return None
+    if raw.isdigit() and 1 <= int(raw) <= len(rows):
+        return rows[int(raw) - 1][0]
+    if raw in dict((r[0], r) for r in rows):
+        return raw
+    print("not a listed provider: %r" % raw, file=sys.stderr)
+    return None
+
+
+def prompt_key(name, prov):
+    """Get a key from the user, via the clipboard by default.
+
+    Three things went wrong with a bare getpass prompt, and each is handled here.
+
+    The key comes from a page that is hard to find and easy to confuse with the
+    vendor's other console, so the console URL is offered first — the wrong-page
+    401 is the failure this whole command exists to catch, and catching it after
+    the paste is later than necessary.
+
+    A key pasted into an invisible prompt cannot be checked by eye, so a blind
+    paste of a shell prompt, a whole curl command or the wrong line of a page
+    reads as a vendor outage. Reading the clipboard and echoing a masked preview
+    makes the mistake visible before the round trip.
+
+    Typing into getpass is still there for anyone who would rather not have a
+    live credential on the clipboard.
+    """
+    label = prov.get("label") or name
+    url = prov.get("console_url")
+    hint = prov.get("console_hint")
+    if url:
+        print("Key page for %s:\n  %s" % (label, url))
+        if hint:
+            print("⚠ " + hint)
+        try:
+            if input("open it in the browser? [Y/n] ").strip().lower() in ("", "y", "yes"):
+                if not open_url(url):
+                    print("  (no browser opener found — open it by hand)")
+        except (EOFError, KeyboardInterrupt):
+            print("\naborted", file=sys.stderr)
+            return None
+    else:
+        print("⚠ The key must come from %s's SUBSCRIPTION console. A "
+              "pay-as-you-go key from the same account looks identical and 401s "
+              "against this endpoint." % label)
+
+    has_clip = clipboard() is not None
+    if has_clip:
+        print("\nCopy the key, then press Enter and I will read it from the "
+              "clipboard.\nOr type it here instead — it is not echoed and never "
+              "enters shell history.")
+    else:
+        print("\nPaste the key — not echoed, and it never enters shell history.")
+    try:
+        key = getpass.getpass("key [Enter = clipboard]: " if has_clip else "key: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        print("\naborted", file=sys.stderr)
+        return None
+
+    if not key and has_clip:
+        key = (clipboard() or "").strip()
+        if not key:
+            print("clipboard is empty", file=sys.stderr)
+            return None
+        if "\n" in key:
+            key = key.splitlines()[0].strip()
+            print("  (clipboard had several lines — using the first)")
+        print("  from clipboard: %s" % mask(key))
+    if not key:
+        print("nothing entered", file=sys.stderr)
+        return None
+
+    pat = prov.get("key_pattern")
+    if pat and not re.match(pat, key):
+        # A warning, not a gate. The pattern is this repo's guess at the vendor's
+        # key shape, and a vendor is free to change it without telling anyone --
+        # so a mismatch must never be able to lock out a key that actually works.
+        print("⚠ %s does not look like a %s key (expected /%s/)."
+              % (mask(key), label, pat))
+        try:
+            if input("  use it anyway? [y/N] ").strip().lower() not in ("y", "yes"):
+                return None
+        except (EOFError, KeyboardInterrupt):
+            print("\naborted", file=sys.stderr)
+            return None
+    return key
+
+
 def provider_probe(name, prov, key, cat, wire=None):
     """One minimal request to the vendor, to prove a key works before saving it.
 
@@ -434,11 +588,42 @@ def cmd_login(args):
     """Store an outside subscription's key, after checking the vendor accepts it."""
     cat = load()
     known = cat.get("providers", {})
-    prov = known.get(args.provider)
+
+    if args.all:
+        rows = provider_rows(cat)
+        if not rows:
+            print("no providers declared in models.json")
+            return 0
+        bad = 0
+        for name, p, has in rows:
+            if not has:
+                print("\u2717 %-8s no key      run: switchboard login %s" % (name, name))
+                bad += 1
+                continue
+            status, detail = provider_probe(name, p, read_keyfile(p.get("key_file", "")), cat)
+            if status in (200, 400, 429):
+                print("\u2713 %-8s key works  (HTTP %s)" % (name, status))
+            else:
+                print("\u2717 %-8s HTTP %s%s  run: switchboard login %s"
+                      % (name, status, ": " + detail[:50] if detail else "", name))
+                bad += 1
+        return 1 if bad else 0
+
+    name = args.provider or pick_provider(cat)
+    if not name:
+        return 1
+    args.provider = name
+    prov = known.get(name)
     if not prov:
         print("no provider %r. Known: %s"
-              % (args.provider, ", ".join(sorted(known)) or "none"), file=sys.stderr)
+              % (name, ", ".join(sorted(known)) or "none"), file=sys.stderr)
         return 1
+
+    if args.set_console:
+        prov["console_url"] = args.set_console
+        save(cat)
+        print("%s console_url = %s" % (name, args.set_console))
+        return 0
     path = os.path.expanduser(prov.get("key_file") or "")
     if not path:
         print("provider %r declares no key_file" % args.provider, file=sys.stderr)
@@ -459,18 +644,8 @@ def cmd_login(args):
             print("no key stored at %s" % path, file=sys.stderr)
             return 1
     else:
-        label = prov.get("label") or args.provider
-        print("Paste the %s key — not echoed, and it never enters shell history."
-              % label)
-        print("⚠ It must come from the SUBSCRIPTION console. A pay-as-you-go key "
-              "from the same account looks identical and 401s against this endpoint.")
-        try:
-            key = getpass.getpass("key: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print("\naborted", file=sys.stderr)
-            return 1
+        key = prompt_key(args.provider, prov)
         if not key:
-            print("nothing entered", file=sys.stderr)
             return 1
 
     status, detail = provider_probe(args.provider, prov, key, cat)
@@ -582,7 +757,14 @@ def main():
 
     lg = sub.add_parser("login", help="store an outside subscription's key, after "
                                      "checking the vendor actually accepts it")
-    lg.add_argument("provider", help="a name under 'providers' in models.json, e.g. kimi")
+    lg.add_argument("provider", nargs="?",
+                    help="a name under 'providers' in models.json, e.g. kimi. "
+                         "Omit it to pick from a list showing which are signed in")
+    lg.add_argument("--all", action="store_true",
+                    help="check every provider's stored key and exit")
+    lg.add_argument("--set-console", metavar="URL",
+                    help="record where this provider's key page lives, so login "
+                         "can offer to open it")
     lg.add_argument("--check", action="store_true",
                     help="verify the stored key instead of prompting for a new one")
     lg.add_argument("--remove", action="store_true", help="delete the stored key")

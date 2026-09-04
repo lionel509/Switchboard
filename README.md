@@ -90,27 +90,64 @@ account"*; the only provider-specific setup commands in the binary are `/setup-b
 `/setup-vertex`. A vendor subscription has no login path into Claude Code at all — it is a key
 file, and that is the end of it.
 
-`switchboard.py login <provider>` is the nearest equivalent, and it earns its place over
+`switchboard login` is the nearest equivalent, and it earns its place over
 `printf > keyfile` by **verifying the key against the vendor before storing it**:
 
 ```
-$ ./switchboard.py login kimi
-Paste the Kimi key — not echoed, and it never enters shell history.
-⚠ It must come from the SUBSCRIPTION console. A pay-as-you-go key from the same
-  account looks identical and 401s against this endpoint.
-key:
+$ switchboard login
+Outside subscriptions:
+  1. kimi     api.kimi.com/coding          ✗ no key
+which: 1
+Key page for Kimi:
+  https://www.kimi.com/coding
+⚠ This is the Kimi For Coding SUBSCRIPTION page. Do not use platform.moonshot.ai —
+  that is the pay-as-you-go console, and its keys are the same shape but 401 here.
+open it in the browser? [Y/n]
+
+Copy the key, then press Enter and I will read it from the clipboard.
+Or type it here instead — it is not echoed and never enters shell history.
+key [Enter = clipboard]:
+  from clipboard: sk-abc…7f21
 ✗ kimi rejected the key (HTTP 401): The API Key appears to be invalid…
   Usual cause: the wrong console. api.kimi.com/coding only accepts its subscription credentials.
   NOT saved. Re-run with --force to store it regardless.
 ```
+
+Each step of that exists because of a specific way the bare prompt failed.
+
+**The provider name is a list, not something to remember.** `login` with no argument shows
+every declared provider with whether its key is actually stored, and takes a number.
+
+**The console URL comes first.** The wrong-page 401 is the failure this command exists to
+catch, and offering the right page beforehand catches it earlier than any check can. The URL
+is provider config (`console_url`), not code — `login <p> --set-console <url>` corrects it
+without editing JSON, which matters because vendors move these pages and this one is a
+best guess rather than a documented address.
+
+**The clipboard is the default input.** A key pasted into an invisible prompt cannot be
+checked by eye, so a stray shell prompt, a whole `curl` line, or the wrong line of a page all
+read later as a vendor outage. Press Enter and it reads the clipboard, takes the first line,
+and echoes a masked preview — so the mistake is visible before the round trip. Typing is
+still there for anyone who would rather not put a live credential on the clipboard.
+
+**`key_pattern` warns, it never blocks.** It is deliberately loose (`^[A-Za-z0-9._:-]{16,}$`)
+— enough to catch a pasted URL, command or sentence, and nothing more. A vendor may change
+its key shape without telling anyone, so a shape guess must never be able to lock out a key
+that works.
 
 That failure is the one worth catching. A vendor usually sells two products off one account — a
 subscription and pay-as-you-go — whose keys are indistinguishable by eye and are **not
 interchangeable**. Stored blind, the wrong one surfaces as a 401 halfway through a task, which
 reads like the router breaking rather than a paste from the wrong page.
 
-`--check` re-tests the stored key without prompting, `--remove` deletes it, and `list` marks
-each provider ✓ or ✗ so an inert row is visible before you pick it.
+`--check` re-tests the stored key without prompting, `--remove` deletes it, `--all` checks
+every provider at once, and `list` marks each provider ✓ or ✗ so an inert row is visible
+before you pick it.
+
+```sh
+$ switchboard login --all
+✓ kimi     key works  (HTTP 200)
+```
 
 **Why not just set `ANTHROPIC_BASE_URL` to the vendor, as their docs tell you?** Because that
 is global. It replaces Anthropic for the whole session and takes every Claude row in the
@@ -424,6 +461,12 @@ Requires Python 3.9+ and an [OpenRouter](https://openrouter.ai) key.
 ```sh
 git clone https://github.com/lionel509/Switchboard.git ~/.local/share/claude-router
 printf '%s' 'sk-or-v1-…' > ~/.config/openrouter-key && chmod 600 ~/.config/openrouter-key
+
+# put the CLI on PATH, so it is `switchboard …` rather than a path
+install -m 755 /dev/stdin ~/.local/bin/switchboard <<'SH'
+#!/bin/sh
+exec python3 "$HOME/.local/share/claude-router/switchboard.py" "$@"
+SH
 ```
 
 Add to `~/.zshrc`:

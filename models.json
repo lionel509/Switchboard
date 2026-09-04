@@ -15,7 +15,10 @@
         "container",
         "mcp_servers"
       ],
-      "label": "Kimi"
+      "label": "Kimi",
+      "console_url": "https://www.kimi.com/coding",
+      "console_hint": "This is the Kimi For Coding SUBSCRIPTION page. Do not use platform.moonshot.ai — that is the pay-as-you-go console, and its keys are the same shape but 401 against this endpoint.",
+      "key_pattern": "^[A-Za-z0-9._:\\-]{16,}$"
     }
   },
   "family_labels": {
