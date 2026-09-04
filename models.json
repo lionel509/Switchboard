@@ -119,6 +119,8 @@
       "model": "deepseek/deepseek-v4-pro"
     }
   ],
+  "_failover_note": "On 402/429/529 the router retries the next model here before answering. 401/403 is NOT included: a bad credential must never silently drain a different quota. A target containing '/' is METERED — failing over to one spends cash, so these are set deliberately, not by default.",
+  "failover_default": [],
   "models": [
     {
       "id": "claude-haiku-4-5-20251001",
@@ -146,7 +148,10 @@
       ],
       "context": 1000000,
       "good_at": "the reliable default for real coding and agentic tool use, with no cash cost. Costs subscription quota.",
-      "blurb": "Fast workhorse for routine coding"
+      "blurb": "Fast workhorse for routine coding",
+      "failover": [
+        "~google/gemini-pro-latest"
+      ]
     },
     {
       "id": "claude-opus-5",
@@ -160,7 +165,10 @@
       ],
       "context": 1000000,
       "good_at": "hardest reasoning and large multi-file refactors, with no cash cost. Costs the most subscription quota.",
-      "blurb": "Deep reasoning and big refactors"
+      "blurb": "Deep reasoning and big refactors",
+      "failover": [
+        "claude-sonnet-5"
+      ]
     },
     {
       "id": "~deepseek/deepseek-v4-flash-latest",
@@ -285,7 +293,10 @@
       ],
       "source": "Arena WebDev #1 (1679) Jul 2026; Vercel Next.js eval tied #1 at 92%",
       "blurb": "Frontend — React, CSS, layout",
-      "_tier_note": "upstream_id/context are DISCOVERED, not assumed: `switchboard.py login` tries upstream_candidates best-first against the real key and writes whichever the plan actually serves. No official source states whether Kimi Code's 1M model is tier-gated, so do not trust a blog for it — re-run `login --check` after any plan change."
+      "_tier_note": "upstream_id/context are DISCOVERED, not assumed: `switchboard.py login` tries upstream_candidates best-first against the real key and writes whichever the plan actually serves. No official source states whether Kimi Code's 1M model is tier-gated, so do not trust a blog for it — re-run `login --check` after any plan change.",
+      "failover": [
+        "moonshotai/kimi-k3"
+      ]
     },
     {
       "id": "moonshotai/kimi-k3",

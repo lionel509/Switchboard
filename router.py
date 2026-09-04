@@ -521,6 +521,32 @@ def sanitize_native(body, prov, wire_model):
     return json.dumps(req).encode()
 
 
+# Statuses that mean "this route is out of capacity", not "this request is wrong".
+# 429 rate limit / quota, 402 payment required, 529 overloaded. A 401/403 is a
+# credential problem and must NOT silently drain a different quota instead.
+FAILOVER_STATUSES = frozenset((402, 429, 529))
+
+
+def failover_chain(model):
+    """Models to try after `model` runs out of capacity, best-first.
+
+    Per-model `failover` wins; otherwise the catalog-wide `failover_default`.
+    Self-references and duplicates are dropped so a bad config cannot loop.
+    """
+    entry = BY_ID.get(model) or {}
+    chain = entry.get("failover")
+    if chain is None:
+        chain = CATALOG.get("failover_default") or []
+    if isinstance(chain, str):
+        chain = [chain]
+    seen, out = {model}, []
+    for m in chain:
+        if m and m not in seen and m in BY_ID:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
 def upstream_for(model):
     """Vendor prefix first, then the generic slash rule.
 
@@ -577,38 +603,58 @@ class Router(BaseHTTPRequestHandler):
                     req["model"] = model
                     body = json.dumps(req).encode()
 
+        attempts = [model] + failover_chain(model)
+        prepared, errors = [], []
+        for cand in attempts:
+            got = self.prepare(cand, body)
+            if isinstance(got, str):
+                errors.append("%s: %s" % (cand, got))
+            else:
+                prepared.append(got)
+        if not prepared:
+            return self.fail(500, "; ".join(errors) or "no usable upstream")
+
+        self.relay("POST" if body else self.command, prepared,
+                   requested=requested)
+
+    def prepare(self, model, body):
+        """Everything needed to issue one attempt, or a string explaining why not.
+
+        Split out of route() so a failover attempt is built the same way as the
+        first one -- each target needs its own credential, path, body sanitising
+        and model name on the wire, and reusing the previous target's would send
+        one vendor's request to another.
+        """
         target = upstream_for(model)
+        if body:
+            try:
+                req = json.loads(body)
+                req["model"] = model
+                body = json.dumps(req).encode()
+            except Exception:
+                pass
         if target.startswith("direct:"):
             vendor = target.split(":", 1)[1]
             prov = PROVIDERS[vendor]
             keyfile = prov.get("key_file", "")
             key = read_key(keyfile)
             if not key:
-                return self.fail(500, "no %s key at %s" % (vendor, keyfile or "<unset>"))
+                return "no %s key at %s" % (vendor, keyfile or "<unset>")
             host = prov["host"]
             path = prov.get("path_prefix", "").rstrip("/") + self.path
             headers = self.headers_for_direct(prov, key)
             wire = UPSTREAM_ID.get(model) or model.split("/", 1)[-1]
             body = sanitize_native(body, prov, wire)
-            # Claude Code fixes its compaction window ONCE per session, from the
-            # model it started on. Switching mid-conversation into a smaller model
-            # therefore keeps packing the old window, and the vendor's own error
-            # for that is unhelpful and arrives after the round trip. Catch it here
-            # while there is still something actionable to say.
             limit = (BY_ID.get(model) or {}).get("context")
             approx = len(body) // 4                    # ~4 chars per token
             if limit and approx > limit:
-                return self.fail(413,
-                    "this conversation is ~%s tokens and %s holds %s. Claude Code "
-                    "sets its context window once per session, so switching into a "
-                    "smaller model mid-conversation overflows it. Run /compact, or "
-                    "switch back to a Claude model and continue there."
-                    % ("{:,}".format(approx), model, "{:,}".format(limit)))
+                return ("this conversation is ~%s tokens and %s holds %s"
+                        % ("{:,}".format(approx), model, "{:,}".format(limit)))
             target = vendor            # log each subscription as its own pool
         elif target == "openrouter":
             key = or_key()
             if not key:
-                return self.fail(500, "no OpenRouter key at ~/.config/openrouter-key")
+                return "no OpenRouter key at ~/.config/openrouter-key"
             host, path = "openrouter.ai", "/api" + self.path
             headers = self.headers_for_openrouter(key)
             body = sanitize(body)
@@ -616,14 +662,11 @@ class Router(BaseHTTPRequestHandler):
             host, path = "api.anthropic.com", self.path
             headers = self.headers_passthrough()
         if body:
-            # The body may have been rewritten (auto) or trimmed (sanitize), so
-            # the client's Content-Length can no longer be trusted on either path.
             for k in [k for k in headers if k.lower() == "content-length"]:
                 del headers[k]
             headers["Content-Length"] = str(len(body))
-
-        self.relay("POST" if body else self.command, host, path, headers, body,
-                   model=model, upstream=target, requested=requested)
+        return {"model": model, "upstream": target, "host": host, "path": path,
+                "headers": headers, "body": body}
 
     def headers_passthrough(self):
         """Everything the client sent, minus hop-by-hop. Credential untouched."""
@@ -658,21 +701,51 @@ class Router(BaseHTTPRequestHandler):
             h["anthropic-version"] = "2023-06-01"
         return h
 
-    def relay(self, method, host, path, headers, body, model="", upstream="",
-              requested=""):
+    def relay(self, method, prepared, requested=""):
+        """Issue attempts in order until one has capacity, then stream it.
+
+        The decision is safe to make here because nothing has been written to the
+        client yet -- the status line is known before the first byte goes out, so
+        a 429 on the first choice can be abandoned silently. Once streaming
+        starts there is no going back, which is why failover is status-based and
+        never mid-stream.
+        """
         t0 = time.time()
-        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": upstream,
-               "model_requested": model}
-        if requested and requested != model:
-            rec["auto_from"] = requested        # picker said auto; we chose model
-        try:
-            conn = http.client.HTTPSConnection(host, timeout=900)
-            conn.request(method, path, body=body, headers=headers)
-            resp = conn.getresponse()
-        except Exception as e:
-            rec.update(status=502, error=str(e), ms=int((time.time() - t0) * 1000))
-            log_request(rec)
-            return self.fail(502, "upstream %s: %s" % (host, e))
+        resp = conn = None
+        att = prepared[0]
+        for i, att in enumerate(prepared):
+            last = (i == len(prepared) - 1)
+            rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                   "upstream": att["upstream"], "model_requested": att["model"]}
+            if requested and requested != att["model"]:
+                rec["auto_from"] = requested
+            if i:
+                rec["failover_from"] = prepared[i - 1]["model"]
+            try:
+                conn = http.client.HTTPSConnection(att["host"], timeout=900)
+                conn.request(method, att["path"], body=att["body"],
+                             headers=att["headers"])
+                resp = conn.getresponse()
+            except Exception as e:
+                rec.update(status=502, error=str(e), ms=int((time.time() - t0) * 1000))
+                log_request(rec)
+                if last:
+                    return self.fail(502, "upstream %s: %s" % (att["host"], e))
+                continue
+            if resp.status in FAILOVER_STATUSES and not last:
+                rec.update(status=resp.status, failed_over_to=prepared[i + 1]["model"],
+                           ms=int((time.time() - t0) * 1000))
+                log_request(rec)
+                try:
+                    resp.read()          # drain so the socket can be closed cleanly
+                    conn.close()
+                except Exception:
+                    pass
+                continue
+            break
+        if resp is None:                      # every attempt raised
+            return self.fail(502, "no upstream answered")
+        host, model, upstream = att["host"], att["model"], att["upstream"]
 
         streaming = resp.getheader("content-length") is None
         rec["status"], rec["stream"] = resp.status, streaming
