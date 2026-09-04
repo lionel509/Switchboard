@@ -140,6 +140,46 @@ subscription and pay-as-you-go — whose keys are indistinguishable by eye and a
 interchangeable**. Stored blind, the wrong one surfaces as a 401 halfway through a task, which
 reads like the router breaking rather than a paste from the wrong page.
 
+### `login --oauth` — no key at all
+
+Where a vendor runs a device-authorization flow (RFC 8628), there is nothing to find
+and nothing to paste:
+
+```sh
+$ switchboard login kimi --oauth
+Signing in to Kimi via its public OAuth client (17e5f671…) at https://auth.kimi.com.
+A browser page will ask you to approve this device on your account.
+continue? [Y/n]
+
+Approve this device:
+  https://www.kimi.com/code/authorize_device?user_code=NPQ9-VAKB
+  user code: NPQ9-VAKB
+  (opened in your browser)
+
+waiting for approval.... approved
+stored ~/.config/kimi-oauth.json and ~/.config/kimi-key (0600)
+✓ the OAuth token authenticates against api.kimi.com/coding (HTTP 200)
+```
+
+**The router needs no code for this.** The access token is written to `key_file`
+unchanged, so the router still just reads a file and sets a header; the `oauth` block
+carries `auth_header`/`auth_prefix` (`Authorization`/`Bearer`), applied to the provider
+on success. The refresh token and expiry live beside it, for `login <p> --refresh`.
+
+**It verifies the thing that actually matters.** A token good for the vendor's own CLI
+is not automatically good for the endpoint this router targets, so after storing, the
+same probe the key path uses runs against `api.kimi.com/coding` and reports either way.
+
+> [!note]
+> **Nothing here claims to be the vendor's CLI.** The design doc says the token
+> endpoints require device identity headers (`X-Msh-Platform: kimi_cli`, a version, …).
+> Measured 2026-09-04, they do not: `device_authorization` returns 200 and the token
+> poll returns `authorization_pending` with **no** such headers — byte-identical to
+> sending them. So only genuine device info goes, under a stable per-machine id in
+> `~/.config/switchboard-device-id`. The `headers` map in the `oauth` block is empty; if
+> a backend ever starts requiring an identity, putting one there makes `login --oauth`
+> disclose it before sending anything.
+
 `--check` re-tests the stored key without prompting, `--remove` deletes it, `--all` checks
 every provider at once, and `list` marks each provider ✓ or ✗ so an inert row is visible
 before you pick it.
