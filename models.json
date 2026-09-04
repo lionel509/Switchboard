@@ -3,12 +3,32 @@
   "router_model": "~deepseek/deepseek-v4-flash-latest",
   "fallback": "claude-sonnet-5",
   "_providers_note": "A vendor with its own Anthropic-compatible endpoint and its own subscription, matched on the first segment of the model id. path_prefix is joined to the incoming path, so /coding + /v1/messages -> /coding/v1/messages. The key file is read per request and never cached; your claude.ai token is stripped before the request leaves the machine. Set cache_control false if a vendor rejects the markers, and add to drop_fields anything it 400s on.",
+  "_upstreams_note": "Display only — the router never reads this. Credential paths shown in the editor's PROVIDERS panel. Add rows here as more are wired up.",
+  "upstreams": [
+    {
+      "name": "anthropic",
+      "label": "Claude",
+      "host": "api.anthropic.com",
+      "fixed": true,
+      "note": "via Claude Code",
+      "detail": "credential forwarded untouched; never read, stored or logged here"
+    },
+    {
+      "name": "openrouter",
+      "label": "OpenRouter",
+      "host": "openrouter.ai",
+      "key_file": "~/.config/openrouter-key",
+      "verify_url": "https://openrouter.ai/api/v1/key",
+      "console_url": "https://openrouter.ai/settings/keys",
+      "note": "metered per token"
+    }
+  ],
   "providers": {
     "kimi": {
       "host": "api.kimi.com",
       "path_prefix": "/coding",
       "key_file": "~/.config/kimi-key",
-      "auth_header": "x-api-key",
+      "auth_header": "Authorization",
       "cache_control": true,
       "drop_fields": [
         "context_management",
@@ -30,7 +50,8 @@
         "auth_prefix": "Bearer",
         "_headers_note": "Measured 2026-09-04: auth.kimi.com accepts device_authorization and the token poll with NO vendor identity headers — identical responses with and without X-Msh-Platform/Version. So none are sent. Only genuine device info goes, and switchboard does not claim to be kimi_cli. If the backend ever starts requiring an identity, add it here and the disclosure fires again.",
         "headers": {}
-      }
+      },
+      "auth_prefix": "Bearer"
     }
   },
   "family_labels": {

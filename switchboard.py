@@ -848,9 +848,14 @@ def cmd_login(args):
             status, detail = provider_probe(name, p, read_keyfile(p.get("key_file", "")), cat)
             if status in (200, 400, 429):
                 print("\u2713 %-8s key works  (HTTP %s)" % (name, status))
+            elif status in (401, 403):
+                print("\u2717 %-8s credential rejected (HTTP %s)  run: switchboard login %s"
+                      % (name, status, name))
+                bad += 1
             else:
-                print("\u2717 %-8s HTTP %s%s  run: switchboard login %s"
-                      % (name, status, ": " + detail[:50] if detail else "", name))
+                # Past auth, then a backend failure -- not a sign-in problem.
+                print("! %-8s signed in, but the endpoint failed (HTTP %s)%s"
+                      % (name, status, ": " + detail[:40] if detail else ""))
                 bad += 1
         return 1 if bad else 0
 
@@ -883,12 +888,22 @@ def cmd_login(args):
             print("✓ the OAuth token authenticates against %s%s (HTTP %s)"
                   % (prov.get("host"), prov.get("path_prefix", ""), status))
         else:
-            print("✗ stored, but %s%s rejected the OAuth token (HTTP %s)%s"
-                  % (prov.get("host"), prov.get("path_prefix", ""), status,
-                     ": " + detail if detail else ""), file=sys.stderr)
-            print("  The token is valid for the vendor's own CLI but not for this "
-                  "endpoint — the subscription may require its console key instead.",
-                  file=sys.stderr)
+            where = "%s%s" % (prov.get("host"), prov.get("path_prefix", ""))
+            if status in (401, 403):
+                print("✗ %s rejected the OAuth token (HTTP %s)%s"
+                      % (where, status, ": " + detail if detail else ""),
+                      file=sys.stderr)
+            else:
+                # Measured on api.kimi.com/coding: no credential AND a junk bearer
+                # both return 401. So anything that is not 401/403 means the token
+                # was accepted and the backend then failed — a different problem,
+                # and reporting it as a bad key sends you to re-paste for nothing.
+                print("! %s accepted the token, then failed (HTTP %s)%s"
+                      % (where, status, ": " + detail if detail else ""),
+                      file=sys.stderr)
+                print("  The credential is fine — a rejected one returns 401 here. "
+                      "A 5xx usually means the account has no active plan on this "
+                      "endpoint, or the vendor is having an outage.", file=sys.stderr)
             return 1
         if exp:
             print("Renew before it expires with:  switchboard login %s --refresh" % name)
