@@ -387,12 +387,19 @@ def clipboard():
                 return None
             if out.returncode == 0:
                 return out.stdout.decode("utf-8", "replace").strip()
-            return None
+            continue          # installed but failing (e.g. wl-paste with no Wayland)
     return None
 
 
 def open_url(url):
-    """Hand a URL to the desktop browser. False if there is no opener."""
+    """Hand a URL to the desktop browser. False if there is no opener.
+
+    http/https only. `open` dispatches file:// and any registered app scheme, and
+    console_url is free text from --set-console, so the scheme is checked here
+    rather than trusted.
+    """
+    if not re.match(r"^https?://", url or ""):
+        return False
     for cmd in ("open", "xdg-open"):
         if shutil.which(cmd):
             try:
@@ -430,18 +437,22 @@ def pick_provider(cat):
     print("Outside subscriptions:")
     for i, (name, p, has) in enumerate(rows, 1):
         print("  %d. %-8s %-28s %s"
-              % (i, name, p.get("host", "?") + p.get("path_prefix", ""),
+              % (i, name, p.get("host", "?") + (p.get("path_prefix") or ""),
                  "✓ signed in" if has else "✗ no key"))
-    try:
-        raw = input("which: ").strip()
-    except (EOFError, KeyboardInterrupt):
-        print("\naborted", file=sys.stderr)
-        return None
-    if raw.isdigit() and 1 <= int(raw) <= len(rows):
-        return rows[int(raw) - 1][0]
-    if raw in dict((r[0], r) for r in rows):
-        return raw
-    print("not a listed provider: %r" % raw, file=sys.stderr)
+    names = dict((r[0], r) for r in rows)
+    for _ in range(3):                 # a typo should not abort the whole command
+        try:
+            raw = input("which: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\naborted", file=sys.stderr)
+            return None
+        # "²".isdigit() is True while int("²") raises, hence the isascii guard.
+        if raw.isascii() and raw.isdigit() and 1 <= int(raw) <= len(rows):
+            return rows[int(raw) - 1][0]
+        if raw in names:
+            return raw
+        print("not a listed provider: %r — enter a number or a name." % raw,
+              file=sys.stderr)
     return None
 
 
@@ -503,20 +514,30 @@ def prompt_key(name, prov):
             print("clipboard is empty", file=sys.stderr)
             return None
         if "\n" in key:
-            key = key.splitlines()[0].strip()
-            print("  (clipboard had several lines — using the first)")
+            lines = [ln.strip() for ln in key.splitlines() if ln.strip()]
+            pat0 = prov.get("key_pattern")
+            hit = next((ln for ln in lines if pat0 and re.fullmatch(pat0, ln)), None)
+            # A copied block is usually `export KIMI_KEY=…` or a curl line with the
+            # key on the NEXT line, so "first line" is the wrong guess more often
+            # than not. Prefer the line actually shaped like a key.
+            key = hit or (lines[0] if lines else "")
+            print("  (clipboard had several lines — using %s)"
+                  % ("the one shaped like a key" if hit else "the first"))
         print("  from clipboard: %s" % mask(key))
     if not key:
         print("nothing entered", file=sys.stderr)
         return None
 
     pat = prov.get("key_pattern")
-    if pat and not re.match(pat, key):
+    if pat and not re.fullmatch(pat, key):
         # A warning, not a gate. The pattern is this repo's guess at the vendor's
         # key shape, and a vendor is free to change it without telling anyone --
         # so a mismatch must never be able to lock out a key that actually works.
-        print("⚠ %s does not look like a %s key (expected /%s/)."
-              % (mask(key), label, pat))
+        why = ("it contains spaces" if any(c.isspace() for c in key) else
+               "it is only %d characters" % len(key) if len(key) < 16 else
+               "it has characters a key would not")
+        print("⚠ That does not look like a %s key — %s: %s"
+              % (label, why, mask(key)))
         try:
             if input("  use it anyway? [y/N] ").strip().lower() not in ("y", "yes"):
                 return None
@@ -545,8 +566,10 @@ def provider_probe(name, prov, key, cat, wire=None):
                "anthropic-version": "2023-06-01",
                prov.get("auth_header", "x-api-key"):
                    (prefix + " " + key) if prefix else key}
+    if not prov.get("host"):
+        return None, "provider declares no host"
     url = "https://%s%s/v1/messages" % (prov["host"],
-                                        prov.get("path_prefix", "").rstrip("/"))
+                                        (prov.get("path_prefix") or "").rstrip("/"))
     body = json.dumps({"model": wire, "max_tokens": 1,
                        "messages": [{"role": "user", "content": "hi"}]}).encode()
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
@@ -590,6 +613,21 @@ def probe_models(name, prov, key, cat):
 
 def cmd_login(args):
     """Store an outside subscription's key, after checking the vendor accepts it."""
+    # Each of these picks a different branch below, so a pair of them means the
+    # command is about to ignore one of the user's flags without saying so.
+    modes = [n for n, on in (("--all", args.all),
+                             ("--set-console", args.set_console is not None),
+                             ("--remove", args.remove),
+                             ("--check", args.check)) if on]
+    if len(modes) > 1:
+        print("%s do different things — pass one." % " and ".join(modes),
+              file=sys.stderr)
+        return 2
+    if args.all and args.provider:
+        print("--all checks every provider; drop the provider name to use it, "
+              "or drop --all to sign into %s." % args.provider, file=sys.stderr)
+        return 2
+
     cat = load()
     known = cat.get("providers", {})
 
@@ -623,7 +661,7 @@ def cmd_login(args):
               % (name, ", ".join(sorted(known)) or "none"), file=sys.stderr)
         return 1
 
-    if args.set_console:
+    if args.set_console is not None:
         prov["console_url"] = args.set_console
         save(cat)
         print("%s console_url = %s" % (name, args.set_console))
@@ -663,30 +701,37 @@ def cmd_login(args):
               % (args.provider, status, ": " + detail if detail else ""),
               file=sys.stderr)
         print("  Usual cause: the wrong console. %s%s only accepts its "
-              "subscription credentials." % (prov["host"], prov.get("path_prefix", "")),
+              "subscription credentials." % (prov.get("host", "?"),
+                                             prov.get("path_prefix") or ""),
               file=sys.stderr)
         if not args.force:
             print("  NOT saved. Re-run with --force to store it regardless.",
                   file=sys.stderr)
             return 1
-        verdict = "stored UNVERIFIED (vendor rejected it)"
+        verdict = ("stored key is REJECTED by the vendor" if args.check
+                   else "stored UNVERIFIED (vendor rejected it)")
     else:
-        print("could not reach %s: %s" % (prov["host"], detail or status),
+        print("could not reach %s: %s" % (prov.get("host", "?"), detail or status),
               file=sys.stderr)
         if not args.force:
             print("  NOT saved. Re-run with --force to store it anyway.",
                   file=sys.stderr)
             return 1
-        verdict = "stored UNVERIFIED (endpoint unreachable)"
+        verdict = ("stored key unverified (endpoint unreachable)" if args.check
+                   else "stored UNVERIFIED (endpoint unreachable)")
 
     m, results = probe_models(args.provider, prov, key, cat)
     if results:
         print("\nmodels this key can actually use:")
-        for c, verdict, detail in results:
+        # Deliberately not `verdict` — that name holds the AUTHENTICATION result,
+        # and the one line telling you a --force key was rejected is printed from
+        # it after this loop. Rebinding it here silently replaced that warning
+        # with whichever model happened to be probed last.
+        for c, mverdict, mdetail in results:
             print("  %s %-10s %11s tokens  %s%s"
-                  % ("✓" if verdict == "available" else "✗", c["id"],
-                     "{:,}".format(c["context"]), verdict,
-                     ("  — " + detail[:60]) if detail and verdict != "available" else ""))
+                  % ("✓" if mverdict == "available" else "✗", c["id"],
+                     "{:,}".format(c["context"]), mverdict,
+                     ("  — " + mdetail[:60]) if mdetail and mverdict != "available" else ""))
         best = next((c for c, v, _ in results if v == "available"), None)
         if best is None:
             print("⚠ none of the candidates answered. Leaving the catalog at %r."
@@ -707,6 +752,7 @@ def cmd_login(args):
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(key)
+        os.chmod(path, 0o600)      # os.open's mode is ignored for an existing file
         print("wrote %s (0600)" % path)
     print("%s: %s" % (args.provider, verdict))
     if not args.check:
