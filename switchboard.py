@@ -368,7 +368,7 @@ def read_keyfile(path):
         return None
 
 
-def provider_probe(name, prov, key, cat):
+def provider_probe(name, prov, key, cat, wire=None):
     """One minimal request to the vendor, to prove a key works before saving it.
 
     This is the whole value of `login` over `printf > keyfile`. The common
@@ -377,10 +377,11 @@ def provider_probe(name, prov, key, cat):
     one fails later as a 401 in the middle of a task. Caught here it costs one
     round trip.
     """
-    m = next((x for x in cat["models"] if x["id"].split("/")[0] == name), None)
-    if not m:
-        return None, "no model in the catalog for provider %r to test with" % name
-    wire = m.get("upstream_id") or m["id"].split("/", 1)[-1]
+    if wire is None:
+        m = next((x for x in cat["models"] if x["id"].split("/")[0] == name), None)
+        if not m:
+            return None, "no model in the catalog for provider %r to test with" % name
+        wire = m.get("upstream_id") or m["id"].split("/", 1)[-1]
     prefix = prov.get("auth_prefix", "")
     headers = {"content-type": "application/json",
                "anthropic-version": "2023-06-01",
@@ -403,6 +404,30 @@ def provider_probe(name, prov, key, cat):
         return e.code, detail
     except Exception as e:
         return None, str(e)
+
+
+def probe_models(name, prov, key, cat):
+    """Ask the vendor which model ids this key can actually use.
+
+    Plan documentation is unreliable and secondhand — for Kimi Code no official
+    page states whether the 1M model is tier-gated, and the blogs that claim it
+    disagree with each other. The key itself knows. So try the candidates rather
+    than reading about them; ordered best-first, the first that answers is the
+    one to configure.
+    """
+    m = next((x for x in cat["models"] if x["id"].split("/")[0] == name), None)
+    cands = (m or {}).get("upstream_candidates") or []
+    results = []
+    for c in cands:
+        status, detail = provider_probe(name, prov, key, cat, wire=c["id"])
+        if status in (200, 429):
+            verdict = "available"          # 429 = rate limited, so it exists
+        elif status in (400, 404):
+            verdict = "not on this plan"
+        else:
+            verdict = "inconclusive (HTTP %s)" % status
+        results.append((c, verdict, detail))
+    return m, results
 
 
 def cmd_login(args):
@@ -474,6 +499,27 @@ def cmd_login(args):
                   file=sys.stderr)
             return 1
         verdict = "stored UNVERIFIED (endpoint unreachable)"
+
+    m, results = probe_models(args.provider, prov, key, cat)
+    if results:
+        print("\nmodels this key can actually use:")
+        for c, verdict, detail in results:
+            print("  %s %-10s %11s tokens  %s%s"
+                  % ("✓" if verdict == "available" else "✗", c["id"],
+                     "{:,}".format(c["context"]), verdict,
+                     ("  — " + detail[:60]) if detail and verdict != "available" else ""))
+        best = next((c for c, v, _ in results if v == "available"), None)
+        if best is None:
+            print("⚠ none of the candidates answered. Leaving the catalog at %r."
+                  % m.get("upstream_id"), file=sys.stderr)
+        elif m.get("upstream_id") != best["id"] or m.get("context") != best["context"]:
+            was = m.get("upstream_id")
+            m["upstream_id"], m["context"] = best["id"], best["context"]
+            save(cat)
+            print("→ catalog updated: %s → %s (%s tokens). Restart the router."
+                  % (was, best["id"], "{:,}".format(best["context"])))
+        else:
+            print("→ catalog already correct (%s)." % best["id"])
 
     if not args.check:
         d = os.path.dirname(path)

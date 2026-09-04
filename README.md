@@ -121,9 +121,11 @@ here, the subscription is one more row in `/model`, and Auto can weigh it agains
 own syntax for a context variant — an id carrying them can be rewritten before it reaches the
 router. So the picker id stays bare (`kimi/k3`) and `upstream_id` carries what goes on the wire.
 
-**`upstream_id` and `context` track the plan tier, not the model.** Kimi's 1M window ships on
-Allegro and above; lower tiers get `k3-256k`. On an upgrade those two catalog fields are the
-entire change.
+**`upstream_id` and `context` are discovered, not assumed.** Whether a plan serves the 1M model
+is not stated by any official page, and the blogs that claim it contradict each other. So
+`upstream_candidates` lists the ids best-first and `login` tries them against the real key,
+printing what came back and writing the winner into the catalog. Re-run `login --check` after a
+plan change — the credential is the only authority on this.
 
 **Context overflow is refused locally.** Claude Code fixes its compaction window once per
 session, from the model it started on, so switching mid-conversation into a smaller model keeps
