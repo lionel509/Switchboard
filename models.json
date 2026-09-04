@@ -16,9 +16,21 @@
         "mcp_servers"
       ],
       "label": "Kimi",
-      "console_url": "https://www.kimi.com/coding",
+      "console_url": "https://www.kimi.com/code",
       "console_hint": "This is the Kimi For Coding SUBSCRIPTION page. Do not use platform.moonshot.ai — that is the pay-as-you-go console, and its keys are the same shape but 401 against this endpoint.",
-      "key_pattern": "^[A-Za-z0-9._:\\-]{16,}$"
+      "key_pattern": "^[A-Za-z0-9._:\\-]{16,}$",
+      "oauth": {
+        "host": "https://auth.kimi.com",
+        "client_id": "17e5f671-d194-4dfb-9706-5516cb48c098",
+        "device_path": "/api/oauth/device_authorization",
+        "token_path": "/api/oauth/token",
+        "token_file": "~/.config/kimi-oauth.json",
+        "_auth_note": "An OAuth bearer goes in Authorization, not x-api-key; login --oauth applies these to the provider on success.",
+        "auth_header": "Authorization",
+        "auth_prefix": "Bearer",
+        "_headers_note": "Measured 2026-09-04: auth.kimi.com accepts device_authorization and the token poll with NO vendor identity headers — identical responses with and without X-Msh-Platform/Version. So none are sent. Only genuine device info goes, and switchboard does not claim to be kimi_cli. If the backend ever starts requiring an identity, add it here and the disclosure fires again.",
+        "headers": {}
+      }
     }
   },
   "family_labels": {

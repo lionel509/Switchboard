@@ -13,13 +13,14 @@
 so the catalog cannot drift into models that do not exist. Restart the router and
 re-run `sync` for a change to reach the picker.
 """
-import argparse, getpass, json, os, re, shutil, subprocess, sys, urllib.error, urllib.request
+import argparse, getpass, json, os, platform, re, shutil, subprocess, sys, time, urllib.error, urllib.parse, urllib.request, uuid
 
 HERE    = os.path.dirname(os.path.abspath(__file__))
 CATALOG = os.path.join(HERE, "models.json")
 KEYFILE = os.path.expanduser("~/.config/openrouter-key")
 
 TIERS = ("flash", "mini", "lite", "air", "pro", "max", "ultra")
+OAUTH_POLL_MAX = 300        # seconds to wait for browser approval
 
 
 def load():
@@ -611,11 +612,212 @@ def probe_models(name, prov, key, cat):
     return m, results
 
 
+def device_id(path):
+    """A stable per-machine id. The token endpoint requires one; generated once."""
+    p = os.path.expanduser(path)
+    existing = read_keyfile(p)
+    if existing:
+        return existing
+    val = str(uuid.uuid4())
+    d = os.path.dirname(p)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(val)
+    os.chmod(p, 0o600)
+    return val
+
+
+def oauth_headers(oa):
+    """Device headers the token endpoint requires.
+
+    ⚠ These identify the CALLER, and `headers` in the provider config carries the
+    vendor's own CLI identity. That is what makes this work and it is also what
+    makes it a judgement call — see the disclosure printed by `login --oauth`.
+    """
+    h = {"Content-Type": "application/x-www-form-urlencoded",
+         "Accept": "application/json"}
+    h.update(oa.get("headers") or {})
+    h.setdefault("X-Msh-Device-Name", platform.node() or "unknown")
+    h.setdefault("X-Msh-Device-Model", "%s %s %s"
+                 % (platform.system(), platform.release(), platform.machine()))
+    h.setdefault("X-Msh-Os-Version", platform.version())
+    h["X-Msh-Device-Id"] = device_id(oa.get("device_id_file",
+                                            "~/.config/switchboard-device-id"))
+    return h
+
+
+def oauth_post(oa, path, fields):
+    """Form-encoded POST to the OAuth host. Returns (status, dict)."""
+    url = oa["host"].rstrip("/") + path
+    body = urllib.parse.urlencode(fields).encode()
+    req = urllib.request.Request(url, data=body, headers=oauth_headers(oa),
+                                 method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            raw = r.read()
+            return r.status, (json.loads(raw) if raw.strip() else {})
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except Exception:
+            return e.code, {}
+    except Exception as e:
+        return None, {"error": "unreachable", "error_description": str(e)}
+
+
+def save_oauth(name, prov, tok):
+    """Persist the token set, and the access token where the router reads it.
+
+    Two files on purpose. The router is deliberately dumb — it reads one file and
+    puts the contents in a header — so the access token goes to `key_file`
+    unchanged and no router code needs to know OAuth exists. The refresh token
+    and expiry live beside it, for `login --refresh` only.
+    """
+    oa = prov["oauth"]
+    tok = dict(tok)
+    tok["obtained_at"] = int(time.time())
+    tf = os.path.expanduser(oa.get("token_file", "~/.config/%s-oauth.json" % name))
+    for path, blob in ((tf, json.dumps(tok, indent=2)),
+                       (os.path.expanduser(prov["key_file"]), tok["access_token"])):
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(blob)
+        os.chmod(path, 0o600)
+
+    # An OAuth bearer is not an API key: it goes in a different header. Applying
+    # it here rather than asking the user to hand-edit models.json.
+    changed = []
+    for field in ("auth_header", "auth_prefix"):
+        want = oa.get(field)
+        if want and prov.get(field) != want:
+            prov[field] = want
+            changed.append("%s=%s" % (field, want))
+    return tf, changed
+
+
+def oauth_login(name, prov):
+    """RFC 8628 device authorization. Returns the token dict, or None."""
+    oa = prov.get("oauth")
+    if not oa or not oa.get("client_id") or not oa.get("host"):
+        print("%s declares no usable 'oauth' block in models.json" % name,
+              file=sys.stderr)
+        return None
+
+    ident = (oa.get("headers") or {}).get("X-Msh-Platform")
+    print("Signing in to %s via its public OAuth client (%s…) at %s."
+          % (prov.get("label") or name, oa["client_id"][:8], oa["host"]))
+    if ident:
+        # Only reachable if a config puts an identity back. Measured on
+        # 2026-09-04, auth.kimi.com requires none, so nothing is claimed.
+        print("⚠ This presents to the vendor as %r, which is not what this is." % ident)
+    print("A browser page will ask you to approve this device on your account.")
+    try:
+        if input("continue? [Y/n] ").strip().lower() not in ("", "y", "yes"):
+            print("aborted — nothing sent")
+            return None
+    except (EOFError, KeyboardInterrupt):
+        print("\naborted", file=sys.stderr)
+        return None
+
+    status, data = oauth_post(oa, oa.get("device_path", "/api/oauth/device_authorization"),
+                              {"client_id": oa["client_id"]})
+    if status != 200 or not data.get("device_code"):
+        print("✗ device authorization failed (HTTP %s): %s" %
+              (status, data.get("error_description") or data.get("error") or data),
+              file=sys.stderr)
+        return None
+
+    uri = data.get("verification_uri_complete") or data.get("verification_uri") or ""
+    code = data.get("user_code") or ""
+    print("\nApprove this device:\n  %s" % uri)
+    if code:
+        print("  user code: %s" % code)
+    if uri and open_url(uri):
+        print("  (opened in your browser)")
+
+    interval = max(int(data.get("interval") or 5), 1)
+    deadline = time.time() + min(int(data.get("expires_in") or 300), OAUTH_POLL_MAX)
+    print("\nwaiting for approval", end="", flush=True)
+    while time.time() < deadline:
+        time.sleep(interval)
+        print(".", end="", flush=True)
+        st, tok = oauth_post(oa, oa.get("token_path", "/api/oauth/token"),
+                             {"client_id": oa["client_id"],
+                              "device_code": data["device_code"],
+                              "grant_type": "urn:ietf:params:oauth:grant-type:device_code"})
+        if st == 200 and tok.get("access_token"):
+            print(" approved")
+            return tok
+        err = (tok or {}).get("error") or ""
+        if err == "expired_token":
+            print("\n✗ the code expired before it was approved — run login again",
+                  file=sys.stderr)
+            return None
+        if err == "access_denied":
+            print("\n✗ approval was denied", file=sys.stderr)
+            return None
+        if err == "slow_down":
+            interval += 5
+        # authorization_pending, or a blip: keep polling until the deadline.
+    print("\n✗ timed out after %ds waiting for approval" % OAUTH_POLL_MAX,
+          file=sys.stderr)
+    return None
+
+
+def oauth_refresh(name, prov):
+    """Renew the access token from the stored refresh token."""
+    oa = prov.get("oauth") or {}
+    tf = os.path.expanduser(oa.get("token_file", "~/.config/%s-oauth.json" % name))
+    try:
+        with open(tf) as f:
+            stored = json.load(f)
+    except (OSError, ValueError):
+        print("no stored OAuth token at %s — run: switchboard login %s --oauth"
+              % (tf, name), file=sys.stderr)
+        return None
+    rt = stored.get("refresh_token")
+    if not rt:
+        print("stored token has no refresh_token — run login --oauth again",
+              file=sys.stderr)
+        return None
+    st, tok = oauth_post(oa, oa.get("token_path", "/api/oauth/token"),
+                         {"client_id": oa["client_id"], "grant_type": "refresh_token",
+                          "refresh_token": rt})
+    if st != 200 or not tok.get("access_token"):
+        print("✗ refresh failed (HTTP %s): %s"
+              % (st, tok.get("error_description") or tok.get("error") or tok),
+              file=sys.stderr)
+        return None
+    # Some servers omit refresh_token on renewal; keep the old one so the next
+    # refresh still works.
+    tok.setdefault("refresh_token", rt)
+    return tok
+
+
+def human_secs(n):
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return str(n)
+    if n < 3600:
+        return "%d min" % (n // 60)
+    if n < 86400:
+        return "%.1f h" % (n / 3600.0)
+    return "%.1f days" % (n / 86400.0)
+
+
 def cmd_login(args):
     """Store an outside subscription's key, after checking the vendor accepts it."""
     # Each of these picks a different branch below, so a pair of them means the
     # command is about to ignore one of the user's flags without saying so.
     modes = [n for n, on in (("--all", args.all),
+                             ("--oauth", args.oauth),
+                             ("--refresh", args.refresh),
                              ("--set-console", args.set_console is not None),
                              ("--remove", args.remove),
                              ("--check", args.check)) if on]
@@ -660,6 +862,36 @@ def cmd_login(args):
         print("no provider %r. Known: %s"
               % (name, ", ".join(sorted(known)) or "none"), file=sys.stderr)
         return 1
+
+    if args.oauth or args.refresh:
+        tok = oauth_login(name, prov) if args.oauth else oauth_refresh(name, prov)
+        if not tok:
+            return 1
+        tf, changed = save_oauth(name, prov, tok)
+        if changed:
+            save(cat)
+            print("→ %s: %s (restart the router)" % (name, ", ".join(changed)))
+        exp = tok.get("expires_in")
+        print("stored %s and %s (0600)%s"
+              % (tf, prov["key_file"],
+                 " — access token expires in %s" % human_secs(exp) if exp else ""))
+        # The open question this whole path existed to answer: does a token from
+        # the OAuth flow actually authenticate against the coding endpoint?
+        status, detail = provider_probe(name, prov, tok["access_token"], cat)
+        if status in (200, 400, 429):
+            print("✓ the OAuth token authenticates against %s%s (HTTP %s)"
+                  % (prov.get("host"), prov.get("path_prefix", ""), status))
+        else:
+            print("✗ stored, but %s%s rejected the OAuth token (HTTP %s)%s"
+                  % (prov.get("host"), prov.get("path_prefix", ""), status,
+                     ": " + detail if detail else ""), file=sys.stderr)
+            print("  The token is valid for the vendor's own CLI but not for this "
+                  "endpoint — the subscription may require its console key instead.",
+                  file=sys.stderr)
+            return 1
+        if exp:
+            print("Renew before it expires with:  switchboard login %s --refresh" % name)
+        return 0
 
     if args.set_console is not None:
         prov["console_url"] = args.set_console
@@ -810,6 +1042,11 @@ def main():
     lg.add_argument("provider", nargs="?",
                     help="a name under 'providers' in models.json, e.g. kimi. "
                          "Omit it to pick from a list showing which are signed in")
+    lg.add_argument("--oauth", action="store_true",
+                    help="sign in with the provider's device-authorization flow "
+                         "(approve in a browser) instead of pasting a key")
+    lg.add_argument("--refresh", action="store_true",
+                    help="renew the OAuth access token from the stored refresh token")
     lg.add_argument("--all", action="store_true",
                     help="check every provider's stored key and exit")
     lg.add_argument("--set-console", metavar="URL",
