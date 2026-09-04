@@ -80,7 +80,37 @@ Then add the model, and the vendor prefix is what routes it:
     --name 'Kimi K3 (sub)' --specialty frontend \
     --good-at 'React, CSS, layout. No cash; consumes Kimi quota, not Claude quota.'
 ./switchboard.py picker --add kimi/k3 --apply && ./switchboard.py sync
+./switchboard.py login kimi
 ```
+
+### `login` — there is no `/login` for these
+
+Claude Code's `/login` and `claude auth login` are hardcoded to *"Sign in with your Anthropic
+account"*; the only provider-specific setup commands in the binary are `/setup-bedrock` and
+`/setup-vertex`. A vendor subscription has no login path into Claude Code at all — it is a key
+file, and that is the end of it.
+
+`switchboard.py login <provider>` is the nearest equivalent, and it earns its place over
+`printf > keyfile` by **verifying the key against the vendor before storing it**:
+
+```
+$ ./switchboard.py login kimi
+Paste the Kimi key — not echoed, and it never enters shell history.
+⚠ It must come from the SUBSCRIPTION console. A pay-as-you-go key from the same
+  account looks identical and 401s against this endpoint.
+key:
+✗ kimi rejected the key (HTTP 401): The API Key appears to be invalid…
+  Usual cause: the wrong console. api.kimi.com/coding only accepts its subscription credentials.
+  NOT saved. Re-run with --force to store it regardless.
+```
+
+That failure is the one worth catching. A vendor usually sells two products off one account — a
+subscription and pay-as-you-go — whose keys are indistinguishable by eye and are **not
+interchangeable**. Stored blind, the wrong one surfaces as a 401 halfway through a task, which
+reads like the router breaking rather than a paste from the wrong page.
+
+`--check` re-tests the stored key without prompting, `--remove` deletes it, and `list` marks
+each provider ✓ or ✗ so an inert row is visible before you pick it.
 
 **Why not just set `ANTHROPIC_BASE_URL` to the vendor, as their docs tell you?** Because that
 is global. It replaces Anthropic for the whole session and takes every Claude row in the

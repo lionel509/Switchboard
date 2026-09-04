@@ -6,12 +6,13 @@
     switchboard.py add qwen/qwen3.8-flash --no-zdr --good-at "cheap agentic coding"
     switchboard.py remove qwen/qwen3.8-flash
     switchboard.py sync
+    switchboard.py login kimi
 
 `add` looks the id up on OpenRouter and fills in name, price and context itself,
 so the catalog cannot drift into models that do not exist. Restart the router and
 re-run `sync` for a change to reach the picker.
 """
-import argparse, json, os, re, sys, urllib.request
+import argparse, getpass, json, os, re, sys, urllib.error, urllib.request
 
 HERE    = os.path.dirname(os.path.abspath(__file__))
 CATALOG = os.path.join(HERE, "models.json")
@@ -51,9 +52,10 @@ def cmd_list(args):
     print("router model : %s" % cat.get("router_model", "(none)"))
     print("fallback     : %s" % cat.get("fallback", "(none)"))
     for name, p in sorted(cat.get("providers", {}).items()):
-        print("subscription : %s -> %s%s  (key: %s)"
-              % (name, p.get("host", "?"), p.get("path_prefix", ""),
-                 p.get("key_file", "?")))
+        kf = p.get("key_file", "")
+        mark = "✓" if read_keyfile(kf) else "✗ no key — run: switchboard.py login " + name
+        print("subscription : %s -> %s%s  (key: %s %s)"
+              % (name, p.get("host", "?"), p.get("path_prefix", ""), kf or "?", mark))
     print()
     by_family = {}
     for m in cat["models"]:
@@ -358,6 +360,137 @@ def cmd_picker(args):
     return 0
 
 
+def read_keyfile(path):
+    try:
+        with open(os.path.expanduser(path)) as f:
+            return f.read().strip()
+    except OSError:
+        return None
+
+
+def provider_probe(name, prov, key, cat):
+    """One minimal request to the vendor, to prove a key works before saving it.
+
+    This is the whole value of `login` over `printf > keyfile`. The common
+    failure is a key from the *wrong console* — a pay-as-you-go platform key and
+    a subscription key are the same shape from the same account, and the wrong
+    one fails later as a 401 in the middle of a task. Caught here it costs one
+    round trip.
+    """
+    m = next((x for x in cat["models"] if x["id"].split("/")[0] == name), None)
+    if not m:
+        return None, "no model in the catalog for provider %r to test with" % name
+    wire = m.get("upstream_id") or m["id"].split("/", 1)[-1]
+    prefix = prov.get("auth_prefix", "")
+    headers = {"content-type": "application/json",
+               "anthropic-version": "2023-06-01",
+               prov.get("auth_header", "x-api-key"):
+                   (prefix + " " + key) if prefix else key}
+    url = "https://%s%s/v1/messages" % (prov["host"],
+                                        prov.get("path_prefix", "").rstrip("/"))
+    body = json.dumps({"model": wire, "max_tokens": 1,
+                       "messages": [{"role": "user", "content": "hi"}]}).encode()
+    req = urllib.request.Request(url, data=body, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, None
+    except urllib.error.HTTPError as e:
+        detail = ""
+        try:
+            detail = (json.loads(e.read()).get("error") or {}).get("message", "")
+        except Exception:
+            pass
+        return e.code, detail
+    except Exception as e:
+        return None, str(e)
+
+
+def cmd_login(args):
+    """Store an outside subscription's key, after checking the vendor accepts it."""
+    cat = load()
+    known = cat.get("providers", {})
+    prov = known.get(args.provider)
+    if not prov:
+        print("no provider %r. Known: %s"
+              % (args.provider, ", ".join(sorted(known)) or "none"), file=sys.stderr)
+        return 1
+    path = os.path.expanduser(prov.get("key_file") or "")
+    if not path:
+        print("provider %r declares no key_file" % args.provider, file=sys.stderr)
+        return 1
+
+    if args.remove:
+        if os.path.exists(path):
+            os.remove(path)
+            print("removed %s — %s rows will fail until you log in again"
+                  % (path, args.provider))
+        else:
+            print("nothing stored at %s" % path)
+        return 0
+
+    if args.check:
+        key = read_keyfile(path)
+        if not key:
+            print("no key stored at %s" % path, file=sys.stderr)
+            return 1
+    else:
+        label = prov.get("label") or args.provider
+        print("Paste the %s key — not echoed, and it never enters shell history."
+              % label)
+        print("⚠ It must come from the SUBSCRIPTION console. A pay-as-you-go key "
+              "from the same account looks identical and 401s against this endpoint.")
+        try:
+            key = getpass.getpass("key: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\naborted", file=sys.stderr)
+            return 1
+        if not key:
+            print("nothing entered", file=sys.stderr)
+            return 1
+
+    status, detail = provider_probe(args.provider, prov, key, cat)
+    if status == 200:
+        verdict = "key accepted"
+    elif status in (400, 429):
+        # got past authentication, which is the only thing being tested here
+        verdict = "key accepted (HTTP %s — past auth)" % status
+    elif status in (401, 403):
+        print("✗ %s rejected the key (HTTP %s)%s"
+              % (args.provider, status, ": " + detail if detail else ""),
+              file=sys.stderr)
+        print("  Usual cause: the wrong console. %s%s only accepts its "
+              "subscription credentials." % (prov["host"], prov.get("path_prefix", "")),
+              file=sys.stderr)
+        if not args.force:
+            print("  NOT saved. Re-run with --force to store it regardless.",
+                  file=sys.stderr)
+            return 1
+        verdict = "stored UNVERIFIED (vendor rejected it)"
+    else:
+        print("could not reach %s: %s" % (prov["host"], detail or status),
+              file=sys.stderr)
+        if not args.force:
+            print("  NOT saved. Re-run with --force to store it anyway.",
+                  file=sys.stderr)
+            return 1
+        verdict = "stored UNVERIFIED (endpoint unreachable)"
+
+    if not args.check:
+        d = os.path.dirname(path)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(key)
+        print("wrote %s (0600)" % path)
+    print("%s: %s" % (args.provider, verdict))
+    if not args.check:
+        print("The router reads the file per request, but restart it if it was "
+              "started before the provider existed:")
+        print("  pkill -f claude-router/router.py")
+    return 0
+
+
 def cmd_sync(args):
     sync = os.path.join(HERE, "sync-models.py")
     return os.spawnv(os.P_WAIT, sys.executable, [sys.executable, sync])
@@ -400,6 +533,16 @@ def main():
     r = sub.add_parser("remove", help="remove a model")
     r.add_argument("id")
     r.set_defaults(fn=cmd_remove)
+
+    lg = sub.add_parser("login", help="store an outside subscription's key, after "
+                                     "checking the vendor actually accepts it")
+    lg.add_argument("provider", help="a name under 'providers' in models.json, e.g. kimi")
+    lg.add_argument("--check", action="store_true",
+                    help="verify the stored key instead of prompting for a new one")
+    lg.add_argument("--remove", action="store_true", help="delete the stored key")
+    lg.add_argument("--force", action="store_true",
+                    help="store the key even if the vendor rejects it or is unreachable")
+    lg.set_defaults(fn=cmd_login)
 
     p = sub.add_parser("picker", help="compose the /model menu (length only; "
                                       "Auto still sees the whole catalog)")
