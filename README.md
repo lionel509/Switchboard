@@ -221,13 +221,27 @@ python3 switchboard.py apply --revert   # restore the built-in menu
 ```
 
 ```
- 1. Opus (1M)        4. DeepSeek Flash    7. Google Gemini Pro
- 2. Sonnet           5. DeepSeek Pro      8. Kimi K3
- 3. Haiku            6. Google Gemini Flash   9. Auto
+ 1. Opus (1M)     Deep reasoning and big refactors · plan quota
+ 2. Fable (1M)    Hardest and longest-running tasks · plan quota
+ 3. Sonnet (1M)   Fast workhorse for routine coding · plan quota
+ 4. xAI Grok      2M context, current events, blunt review · $2/$6 per 1M
+ 5. Auto          Cheapest model that fits, picked per task
+ 6. Haiku         Quick answers and light tool use · plan quota
+ 7. DeepSeek Flash    Bulk mechanical edits, cheapest here · $0.05/$0.16 per 1M
+ 8. Google Gemini Pro Long documents and huge codebases · $2/$12 per 1M
+ 9. Kimi K3       Frontend — React, CSS, layout · $3/$15 per 1M
+10. DeepSeek Pro  Maths and algorithms at mid price · $1.6/$3.2 per 1M
 ```
 
-Nine rows, no overflow, every variant directly selectable. Edit `claude_rows` and `apply_models`
-in `models.json` to change the lineup; anything omitted is still routable by Auto. The previous
+Ten rows, no overflow, every row directly selectable, ordered by how often it is picked by
+hand rather than by provider. Edit `picker_lineup` in `models.json` to change it; anything
+omitted is still routable by Auto.
+
+The lineup also owns the **description column**. Left to itself Claude Code prints
+`From gateway` next to every gateway row — true and useless, since it says nothing about when
+to pick that row. A lineup entry that is just `{"model": "..."}` fills itself in from the
+catalog as `<blurb> · <price>`; Claude ids are not catalog entries, so give those a `label`
+and `description` inline. The previous
 settings are copied to `settings.json.bak` first.
 
 `replaceBuiltInOptions` hides gateway-discovered rows, so with a lineup applied the `sync` cache

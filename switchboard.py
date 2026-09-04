@@ -170,28 +170,49 @@ def cmd_apply(args):
     can be dropped and every gateway variant listed explicitly — which fits under
     the ten-row limit in a way that adding rows never does. Schema, from the
     binary: {"options": [{model, label?, description?}], replaceBuiltInOptions}.
+
+    The lineup comes from picker_lineup in models.json, in order. It also owns
+    the description column: without one Claude Code prints "From gateway" for a
+    gateway row, which says nothing about when to pick it. A row carrying only a
+    model id fills itself in from the catalog as "<blurb> · <price>".
     """
     cat = load()
     by_id = {m["id"]: m for m in cat["models"]}
-    opts = list(cat.get("claude_rows", []))
-    for mid in cat.get("apply_models", []):
+
+    def money(n):
+        return ("%g" % n) if isinstance(n, (int, float)) else str(n)
+
+    opts = []
+    for row in cat.get("picker_lineup", []):
+        mid = row["model"]
         m = by_id.get(mid)
-        if not m:
-            print("not in the catalog, skipped: %s" % mid, file=sys.stderr)
-            continue
-        label = m.get("name") or mid
-        if m.get("zdr", True) is False:
+        if not m and "/" in mid and not mid.startswith(("~auto/", "~fam/", "~pick/")):
+            print("not in the catalog, listed anyway: %s" % mid, file=sys.stderr)
+        label = row.get("label") or (m or {}).get("name") or mid
+        if m and m.get("zdr", True) is False and "ZDR" not in label:
             label += " (no ZDR)"
-        p = m.get("price", ["?", "?"])
-        if isinstance(p[0], (int, float)) and p[0] < 0:
-            desc = "Priced by whatever it selects"
-        else:
-            desc = "$%s/$%s per 1M" % (p[0], p[1])
-        if m.get("specialties"):
-            desc += " · " + ", ".join(m["specialties"])
+        desc = row.get("description")
+        if desc is None:
+            bits = []
+            if (m or {}).get("blurb"):
+                bits.append(m["blurb"])
+            p = (m or {}).get("price") or []
+            if (m or {}).get("billing") == "subscription":
+                bits.append("plan quota")
+            elif p and isinstance(p[0], (int, float)) and p[0] < 0:
+                bits.append("priced by whatever it selects")
+            elif p:
+                bits.append("$%s/$%s per 1M" % (money(p[0]), money(p[1])))
+            desc = " · ".join(bits)
+        if not desc:
+            # Claude Code falls back to "From gateway" here, which is noise.
+            print("⚠ no description for %s — add a blurb to the catalog" % mid,
+                  file=sys.stderr)
         opts.append({"model": mid, "label": label, "description": desc})
-    opts.append({"model": "~auto/auto", "label": "Auto",
-                 "description": "Routed per task by a cheap router model"})
+    if not opts:
+        print("picker_lineup is empty in models.json — nothing to write",
+              file=sys.stderr)
+        return 1
 
     try:
         with open(SETTINGS) as f:
@@ -222,7 +243,8 @@ def cmd_apply(args):
 
     print("wrote a %d-row lineup to %s (backup: %s)" % (len(opts), SETTINGS, backup))
     for i, o in enumerate(opts, 1):
-        print("  %2d. %-16s %s" % (i, o.get("label", ""), o["model"]))
+        print("  %2d. %-13s %-36s %s" % (i, o.get("label", ""), o["model"],
+                                         o.get("description", "")))
     if len(opts) > 10:
         print("⚠ over 10 rows — the rest collapse behind '… +%d models'."
               % (len(opts) - 10))

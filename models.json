@@ -24,26 +24,49 @@
       "moonshotai/kimi-k3"
     ]
   },
-  "_claude_rows_note": "Used only by 'picker --apply'. These are the built-in Claude rows worth keeping when the lineup is replaced; drop or reorder freely. Aliases work ('sonnet', 'opus[1m]').",
-  "claude_rows": [
+  "_lineup_note": "Used by 'picker --apply': the WHOLE /model menu, in order, weighted by how likely each is to be picked by hand. Ten rows is the limit before Claude Code collapses the rest behind '… +N models'. A row with only a 'model' key fills its label and description from the catalog (blurb + price); give label/description explicitly for Claude ids, which are not catalog entries. Anything left out is still routable by Auto.",
+  "picker_lineup": [
     {
       "model": "opus[1m]",
       "label": "Opus (1M)",
-      "description": "Everyday complex work"
+      "description": "Deep reasoning and big refactors · plan quota"
     },
     {
-      "model": "sonnet",
-      "label": "Sonnet",
-      "description": "Efficient for routine tasks"
+      "model": "claude-fable-5-1[1m]",
+      "label": "Fable (1M)",
+      "description": "Hardest and longest-running tasks · plan quota"
+    },
+    {
+      "model": "claude-sonnet-5[1m]",
+      "label": "Sonnet (1M)",
+      "description": "Fast workhorse for routine coding · plan quota"
+    },
+    {
+      "model": "~x-ai/grok-latest"
+    },
+    {
+      "model": "~auto/auto",
+      "label": "Auto",
+      "description": "Cheapest model that fits, picked per task"
     },
     {
       "model": "haiku",
       "label": "Haiku",
-      "description": "Fastest for quick answers"
+      "description": "Quick answers and light tool use · plan quota"
+    },
+    {
+      "model": "~deepseek/deepseek-v4-flash-latest"
+    },
+    {
+      "model": "~google/gemini-pro-latest"
+    },
+    {
+      "model": "moonshotai/kimi-k3"
+    },
+    {
+      "model": "deepseek/deepseek-v4-pro"
     }
   ],
-  "_apply_models_note": "Used only by 'picker --apply': the exact gateway variants to list as their own rows. Anything omitted is still routable by Auto.",
-  "apply_models": [],
   "models": [
     {
       "id": "claude-haiku-4-5-20251001",
@@ -56,7 +79,8 @@
         0
       ],
       "context": 200000,
-      "good_at": "quick well-formed answers and light tool use, with no cash cost. Costs subscription quota."
+      "good_at": "quick well-formed answers and light tool use, with no cash cost. Costs subscription quota.",
+      "blurb": "Quick answers and light tool use"
     },
     {
       "id": "claude-sonnet-5",
@@ -69,7 +93,8 @@
         0
       ],
       "context": 1000000,
-      "good_at": "the reliable default for real coding and agentic tool use, with no cash cost. Costs subscription quota."
+      "good_at": "the reliable default for real coding and agentic tool use, with no cash cost. Costs subscription quota.",
+      "blurb": "Fast workhorse for routine coding"
     },
     {
       "id": "claude-opus-5",
@@ -82,7 +107,8 @@
         0
       ],
       "context": 1000000,
-      "good_at": "hardest reasoning and large multi-file refactors, with no cash cost. Costs the most subscription quota."
+      "good_at": "hardest reasoning and large multi-file refactors, with no cash cost. Costs the most subscription quota.",
+      "blurb": "Deep reasoning and big refactors"
     },
     {
       "id": "~deepseek/deepseek-v4-flash-latest",
@@ -94,7 +120,8 @@
         0.16
       ],
       "context": 1310720,
-      "good_at": "bulk mechanical work at the lowest price available - renames, greps, reformatting, straightforward edits. 1M context."
+      "good_at": "bulk mechanical work at the lowest price available - renames, greps, reformatting, straightforward edits. 1M context.",
+      "blurb": "Bulk mechanical edits, cheapest here"
     },
     {
       "id": "deepseek/deepseek-v4-pro",
@@ -106,7 +133,8 @@
         3.2
       ],
       "context": 1048576,
-      "good_at": "hard reasoning and multi-step code work at mid price. Strong on maths and algorithms."
+      "good_at": "hard reasoning and multi-step code work at mid price. Strong on maths and algorithms.",
+      "blurb": "Maths and algorithms at mid price"
     },
     {
       "id": "~google/gemini-flash-latest",
@@ -118,7 +146,8 @@
         3.75
       ],
       "context": 1048576,
-      "good_at": "fast general work, summarising, multimodal input. A safe cheap default when unsure."
+      "good_at": "fast general work, summarising, multimodal input. A safe cheap default when unsure.",
+      "blurb": "Fast general work, multimodal input"
     },
     {
       "id": "~google/gemini-pro-latest",
@@ -130,7 +159,8 @@
         12.0
       ],
       "context": 1048576,
-      "good_at": "long documents, large codebases, careful analysis over very large context."
+      "good_at": "long documents, large codebases, careful analysis over very large context.",
+      "blurb": "Long documents and huge codebases"
     },
     {
       "id": "qwen/qwen3.8-flash",
@@ -143,7 +173,8 @@
       ],
       "context": 1000000,
       "zdr": false,
-      "good_at": "cheap agentic and coding work, visual understanding, long video and document analysis."
+      "good_at": "cheap agentic and coding work, visual understanding, long video and document analysis.",
+      "blurb": "Cheap agentic coding, video and docs"
     },
     {
       "id": "~x-ai/grok-latest",
@@ -155,7 +186,8 @@
         6.0
       ],
       "context": 2000000,
-      "good_at": "current events, informal reasoning, code review with opinions."
+      "good_at": "current events, informal reasoning, code review with opinions.",
+      "blurb": "2M context, current events, blunt review"
     },
     {
       "id": "~z-ai/glm-latest",
@@ -167,7 +199,8 @@
         3.96
       ],
       "context": 200000,
-      "good_at": "agentic tool use and coding at mid price."
+      "good_at": "agentic tool use and coding at mid price.",
+      "blurb": "Agentic tool use and coding, mid price"
     },
     {
       "id": "moonshotai/kimi-k3",
@@ -186,7 +219,8 @@
         "css",
         "react"
       ],
-      "source": "Arena WebDev #1 (1679) Jul 2026; Vercel Next.js eval tied #1 at 92%"
+      "source": "Arena WebDev #1 (1679) Jul 2026; Vercel Next.js eval tied #1 at 92%",
+      "blurb": "Frontend — React, CSS, layout"
     },
     {
       "id": "openrouter/auto",
@@ -199,7 +233,8 @@
       ],
       "context": 2000000,
       "good_at": "ANY paid work with no specialist need. Delegates the choice: OpenRouter classifies the prompt into a task type and ranks models by community spend over 7 days, so it tracks the field without this catalog being maintained. Prefer it over naming a specific priced model unless that model has a SPECIALTY the task needs.",
-      "source": "openrouter.ai auto router; ranks by trailing-7-day community task spend"
+      "source": "openrouter.ai auto router; ranks by trailing-7-day community task spend",
+      "blurb": "Delegates the pick to OpenRouter"
     }
   ],
   "_arrow_note": "The ←/→ row. Claude Code's effort slider reaches the wire as output_config.effort, and a row declared via ANTHROPIC_CUSTOM_MODEL_OPTION with SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort gets that slider even as a gateway id. So one picker row carries this shortlist and the arrows choose between them. Ordered weakest to strongest; an unmapped level falls to the strongest set.",
