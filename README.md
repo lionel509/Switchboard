@@ -30,14 +30,18 @@ Two files, ~350 lines, Python standard library only. No dependencies.
 
 One rule, on the `model` field of each request:
 
-| Model id | Upstream | Credential |
-|---|---|---|
-| bare — `claude-opus-5` | `api.anthropic.com` | whatever the client sent, **forwarded untouched** |
-| contains `/` — `~x-ai/grok-latest` | `openrouter.ai` | `~/.config/openrouter-key` |
+| Model id | Upstream | Credential | Billing |
+|---|---|---|---|
+| bare — `claude-opus-5` | `api.anthropic.com` | whatever the client sent, **forwarded untouched** | your claude.ai plan |
+| vendor in `providers` — `kimi/k3` | that vendor's own endpoint | its own key file | **that vendor's plan** |
+| contains `/` — `~x-ai/grok-latest` | `openrouter.ai` | `~/.config/openrouter-key` | metered per token |
+
+The vendor prefix is checked first, so `kimi/k3` and `moonshotai/kimi-k3` are the same model
+bought two different ways and stay distinguishable — subscription and metered, side by side.
 
 Your subscription token is never read, stored, or logged. It is relayed verbatim on the
-Anthropic path, and **stripped** on the OpenRouter path — `Authorization`, `x-api-key` and
-`anthropic-beta` are removed and replaced with the OpenRouter bearer.
+Anthropic path, and **stripped** on both third-party paths — `Authorization`, `x-api-key` and
+`anthropic-beta` are removed and replaced with that provider's credential.
 
 Two transforms make non-Claude models work at all:
 
@@ -49,6 +53,51 @@ Two transforms make non-Claude models work at all:
 
 Each request appends one JSON object to `requests.log` — upstream, model requested vs. model
 actually served, latency, tokens, and cost when reported.
+
+## Outside subscriptions
+
+A flat-fee coding plan from another vendor is a third kind of model: no cash per token, like
+your Claude plan, but drawn from a different quota. Vendors that ship an Anthropic-compatible
+endpoint (Kimi For Coding, and others following it) plug in as a `providers` entry:
+
+```json
+"providers": {
+  "kimi": {
+    "host": "api.kimi.com",
+    "path_prefix": "/coding",
+    "key_file": "~/.config/kimi-key",
+    "auth_header": "x-api-key",
+    "cache_control": true,
+    "drop_fields": ["context_management", "container", "mcp_servers"]
+  }
+}
+```
+
+Then add the model, and the vendor prefix is what routes it:
+
+```sh
+./switchboard.py add k3 --provider kimi --upstream-id 'k3[1m]' \
+    --name 'Kimi K3 (sub)' --specialty frontend \
+    --good-at 'React, CSS, layout. No cash; consumes Kimi quota, not Claude quota.'
+./switchboard.py picker --add kimi/k3 --apply && ./switchboard.py sync
+```
+
+**Why not just set `ANTHROPIC_BASE_URL` to the vendor, as their docs tell you?** Because that
+is global. It replaces Anthropic for the whole session and takes every Claude row in the
+picker with it — you would be choosing between vendors at launch instead of per task. Routed
+here, the subscription is one more row in `/model`, and Auto can weigh it against the others.
+
+**Two ids, on purpose.** The 1M Kimi model is `k3[1m]`, and square brackets are Claude Code's
+own syntax for a context variant — an id carrying them can be rewritten before it reaches the
+router. So the picker id stays bare (`kimi/k3`) and `upstream_id` carries what goes on the wire.
+
+**`sanitize_native` is not `sanitize`.** The OpenRouter path injects a `provider` preference
+block, which is OpenRouter's own extension and a 400 anywhere else. A vendor endpoint speaks
+the Messages API by definition, so its body is left intact apart from the model name and
+`drop_fields`; `cache_control` and `thinking` are passed through rather than rewritten.
+
+Each pool logs under its own `upstream` name (`anthropic`, `kimi`, `openrouter`), so
+`requests.log` answers "what is this subscription actually doing" without guesswork.
 
 ## Auto
 

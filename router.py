@@ -1,12 +1,17 @@
 #!/usr/bin/env python3
 """Route Claude Code requests by model name, so /model switches providers.
 
-  model has no "/"  ->  api.anthropic.com, forwarding whatever credential the
-                        client sent, untouched. Your claude.ai subscription.
-  model has a "/"   ->  openrouter.ai (e.g. x-ai/grok-4.6), using the key in
-                        ~/.config/openrouter-key.
+  model has no "/"    ->  api.anthropic.com, forwarding whatever credential the
+                          client sent, untouched. Your claude.ai subscription.
+  vendor in providers ->  that vendor's own Anthropic-compatible endpoint, on its
+                          own key. For outside *subscriptions* — Kimi For Coding
+                          and friends: flat monthly fee, no cash per token.
+  model has a "/"     ->  openrouter.ai (e.g. x-ai/grok-4.6), using the key in
+                          ~/.config/openrouter-key. Metered per token.
 
-Nothing is stored. The subscription token is forwarded, never read or written.
+Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
+and is stripped on both third-party paths — it never leaves this machine toward
+OpenRouter or a vendor endpoint.
 """
 import hashlib, http.client, json, os, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,6 +41,18 @@ def load_catalog():
 CATALOG      = load_catalog()
 CANDIDATES   = [m for m in CATALOG.get("models", []) if m.get("id")]
 BY_ID        = {m["id"]: m for m in CANDIDATES}
+
+# --- Outside subscriptions -------------------------------------------------
+# A vendor with its own Anthropic-compatible endpoint, billed by its own plan
+# instead of per token. Keyed by the first path segment of the model id, so
+# "kimi/k3" routes here while "moonshotai/kimi-k3" still goes to OpenRouter --
+# the same model, bought two different ways, and they must stay distinguishable.
+#
+# Ids are deliberately split in two. The picker id stays bracket-free, because
+# "[1m]" is Claude Code's own syntax for a context variant and it rewrites ids
+# carrying it; upstream_id is what actually goes on the wire.
+PROVIDERS    = CATALOG.get("providers", {})
+UPSTREAM_ID  = {m["id"]: m["upstream_id"] for m in CANDIDATES if m.get("upstream_id")}
 
 # --- Auto ------------------------------------------------------------------
 # A pseudo-model in the picker. Rather than defaulting to something cheap, Auto
@@ -80,6 +97,17 @@ PORTABLE = {"model", "messages", "system", "max_tokens", "metadata",
 THINKING_BUDGET = int(os.environ.get("CLAUDE_ROUTER_THINKING", "12000"))
 
 
+def strip_cache_control(node):
+    """Remove every cache_control marker, recursively. Anthropic-only."""
+    if isinstance(node, dict):
+        node.pop("cache_control", None)
+        for v in node.values():
+            strip_cache_control(v)
+    elif isinstance(node, list):
+        for v in node:
+            strip_cache_control(v)
+
+
 def sanitize(body):
     """Drop Anthropic-only fields, and cache_control markers, for other models."""
     try:
@@ -90,16 +118,7 @@ def sanitize(body):
     req = {k: v for k, v in req.items() if k in PORTABLE}
     req["provider"] = prefs_for(model)
 
-    def strip_cc(node):
-        if isinstance(node, dict):
-            node.pop("cache_control", None)
-            for v in node.values():
-                strip_cc(v)
-        elif isinstance(node, list):
-            for v in node:
-                strip_cc(v)
-
-    strip_cc(req)
+    strip_cache_control(req)
 
     # Restore reasoning. `thinking` is dropped above as an Anthropic-only field,
     # but OpenRouter honours exactly that one — measured on deepseek-v4-pro:
@@ -463,16 +482,55 @@ def picker_rows():
     return rows
 
 
-def or_key():
+def read_key(path):
+    """A credential from a file, or None. Never logged, never cached."""
     try:
-        with open(KEYFILE) as f:
+        with open(os.path.expanduser(path)) as f:
             return f.read().strip()
     except OSError:
         return None
 
 
+def or_key():
+    return read_key(KEYFILE)
+
+
+def sanitize_native(body, prov, wire_model):
+    """Rewrite a request for a vendor's own Anthropic-compatible endpoint.
+
+    Deliberately not sanitize(). That one is built for OpenRouter and injects a
+    `provider` preference block, which is OpenRouter's own extension and a 400
+    anywhere else. Here the endpoint speaks the Messages API by definition, so
+    the body is left intact apart from the model name and whatever fields the
+    vendor is declared not to understand.
+
+    cache_control is kept by default. These are subscription endpoints, so the
+    win is latency and rate-limit headroom rather than cash; set
+    "cache_control": false on the provider if one starts rejecting the markers.
+    """
+    try:
+        req = json.loads(body)
+    except Exception:
+        return body
+    if wire_model:
+        req["model"] = wire_model
+    for field in prov.get("drop_fields", []):
+        req.pop(field, None)
+    if not prov.get("cache_control", True):
+        strip_cache_control(req)
+    return json.dumps(req).encode()
+
+
 def upstream_for(model):
-    """Provider-qualified slugs (with a /) go to OpenRouter; bare ids to Anthropic."""
+    """Vendor prefix first, then the generic slash rule.
+
+    "kimi/k3"            -> direct:kimi   its own plan, its own endpoint
+    "moonshotai/kimi-k3" -> openrouter    same model, metered per token
+    "claude-opus-5"      -> anthropic
+    """
+    vendor = (model or "").split("/")[0]
+    if vendor in PROVIDERS:
+        return "direct:" + vendor
     return "openrouter" if "/" in (model or "") else "anthropic"
 
 
@@ -520,7 +578,20 @@ class Router(BaseHTTPRequestHandler):
                     body = json.dumps(req).encode()
 
         target = upstream_for(model)
-        if target == "openrouter":
+        if target.startswith("direct:"):
+            vendor = target.split(":", 1)[1]
+            prov = PROVIDERS[vendor]
+            keyfile = prov.get("key_file", "")
+            key = read_key(keyfile)
+            if not key:
+                return self.fail(500, "no %s key at %s" % (vendor, keyfile or "<unset>"))
+            host = prov["host"]
+            path = prov.get("path_prefix", "").rstrip("/") + self.path
+            headers = self.headers_for_direct(prov, key)
+            wire = UPSTREAM_ID.get(model) or model.split("/", 1)[-1]
+            body = sanitize_native(body, prov, wire)
+            target = vendor            # log each subscription as its own pool
+        elif target == "openrouter":
             key = or_key()
             if not key:
                 return self.fail(500, "no OpenRouter key at ~/.config/openrouter-key")
@@ -552,6 +623,25 @@ class Router(BaseHTTPRequestHandler):
             if k.lower() in ("authorization", "x-api-key", "anthropic-beta"):
                 del h[k]
         h["Authorization"] = "Bearer " + key
+        return h
+
+    def headers_for_direct(self, prov, key):
+        """The vendor's own credential, and never yours.
+
+        Same contract as headers_for_openrouter: the claude.ai OAuth token and
+        any Anthropic API key are removed before the request leaves the machine.
+        anthropic-beta goes with them -- a compatible endpoint implements the
+        Messages API, not Anthropic's beta flags, and an unknown one is a 400.
+        """
+        h = self.headers_passthrough()
+        for k in list(h):
+            if k.lower() in ("authorization", "x-api-key", "anthropic-beta"):
+                del h[k]
+        prefix = prov.get("auth_prefix", "")
+        h[prov.get("auth_header", "x-api-key")] = (
+            prefix + " " + key if prefix else key)
+        if not any(k.lower() == "anthropic-version" for k in h):
+            h["anthropic-version"] = "2023-06-01"
         return h
 
     def relay(self, method, host, path, headers, body, model="", upstream="",
@@ -683,5 +773,13 @@ class Router(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     sys.stderr.write("claude-router on 127.0.0.1:%d  (bare ids -> Anthropic, "
-                     "provider/slug -> OpenRouter)\n" % PORT)
+                     "provider/slug -> OpenRouter, subscriptions: %s)\n"
+                     % (PORT, ", ".join(sorted(PROVIDERS)) or "none"))
+    # Say it now rather than at first use: a missing key file is a 500 halfway
+    # through a task, and the picker row gives no hint that it is inert.
+    for _name, _p in sorted(PROVIDERS.items()):
+        if not read_key(_p.get("key_file", "")):
+            sys.stderr.write("  ! %s has no key at %s — its models will fail "
+                             "until that file exists (chmod 600)\n"
+                             % (_name, _p.get("key_file") or "<unset>"))
     ThreadingHTTPServer(("127.0.0.1", PORT), Router).serve_forever()

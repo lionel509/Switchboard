@@ -49,7 +49,12 @@ def guess(mid):
 def cmd_list(args):
     cat = load()
     print("router model : %s" % cat.get("router_model", "(none)"))
-    print("fallback     : %s\n" % cat.get("fallback", "(none)"))
+    print("fallback     : %s" % cat.get("fallback", "(none)"))
+    for name, p in sorted(cat.get("providers", {}).items()):
+        print("subscription : %s -> %s%s  (key: %s)"
+              % (name, p.get("host", "?"), p.get("path_prefix", ""),
+                 p.get("key_file", "?")))
+    print()
     by_family = {}
     for m in cat["models"]:
         by_family.setdefault(m.get("family", "?"), []).append(m)
@@ -57,7 +62,10 @@ def cmd_list(args):
         print(fam)
         for m in sorted(by_family[fam], key=lambda x: x.get("price", [0])[0]):
             if m.get("billing") == "subscription":
-                cost = "quota, no cash"       # not $0 — it is a different currency
+                # not $0 — a different currency, and now more than one plan can
+                # be the payer, so say which pool it draws down.
+                cost = "%s quota" % (m["id"].split("/")[0] if "/" in m["id"]
+                                     else "claude")
             elif (m.get("price") or [0])[0] < 0:
                 cost = "varies (delegated)"
             else:
@@ -79,19 +87,58 @@ def cmd_add(args):
         print("already in the catalog: %s" % args.id, file=sys.stderr)
         return 1
 
-    if args.subscription:
-        # An Anthropic id billed to the plan. Not on OpenRouter, so nothing to
-        # look up, and never published to the picker — it is already there.
-        family, tier = guess(args.id)
-        cat["models"].append({"id": args.id, "name": args.name or args.id,
-                              "family": args.family or family,
-                              "tier": args.tier or tier,
-                              "billing": "subscription", "price": [0, 0],
-                              "good_at": args.good_at or ""})
+    if args.subscription or args.provider:
+        # Plan-billed either way, so there is nothing to look up on OpenRouter.
+        # Two kinds land here and they differ on one thing that matters — whether
+        # the picker already knows the id:
+        #   bare        an Anthropic id. Claude Code lists it natively; publishing
+        #               it again would duplicate every Claude row.
+        #   --provider  an outside subscription on that vendor's own endpoint. Its
+        #               id is vendor-qualified, so it DOES have to be published.
+        vendor = args.provider
+        known = cat.get("providers", {})
+        if vendor and vendor not in known:
+            print("no provider %r in models.json. Known: %s"
+                  % (vendor, ", ".join(sorted(known)) or "none"), file=sys.stderr)
+            print("Add one under 'providers' first — it needs host, path_prefix "
+                  "and key_file.", file=sys.stderr)
+            return 1
+        mid = args.id
+        if vendor and not mid.startswith(vendor + "/"):
+            mid = vendor + "/" + mid          # the prefix is what routes it
+        if any(m["id"] == mid for m in cat["models"]):
+            print("already in the catalog: %s" % mid, file=sys.stderr)
+            return 1
+        family, tier = guess(mid)
+        entry = {"id": mid, "name": args.name or mid,
+                 "family": args.family or vendor or family,
+                 "tier": args.tier or tier,
+                 "billing": "subscription", "price": [0, 0],
+                 "good_at": args.good_at or ""}
+        if args.upstream_id:
+            entry["upstream_id"] = args.upstream_id
+        if args.specialty:
+            entry["specialties"] = args.specialty
+        if args.source:
+            entry["source"] = args.source
+        cat["models"].append(entry)
         save(cat)
-        print("added %s as a subscription model (no cash cost, consumes quota)"
-              % args.id)
-        print("Restart the router — no sync needed, it is already in the picker.")
+        print("added %s as a subscription model (no cash cost, consumes quota)" % mid)
+        if not entry["good_at"]:
+            print("⚠ no --good-at set. Auto's router model picks by these "
+                  "descriptions, so an empty one makes this model unpickable.")
+        if vendor:
+            p = known[vendor]
+            print("routes to %s%s, key read from %s"
+                  % (p.get("host", "?"), p.get("path_prefix", ""),
+                     p.get("key_file", "?")))
+            if args.upstream_id:
+                print("goes on the wire as %r" % args.upstream_id)
+            print("Restart the router, then:")
+            print("  switchboard.py picker --add %s --apply && switchboard.py sync"
+                  % mid)
+        else:
+            print("Restart the router — no sync needed, it is already in the picker.")
         return 0
 
     try:
@@ -198,7 +245,13 @@ def cmd_apply(args):
                 bits.append(m["blurb"])
             p = (m or {}).get("price") or []
             if (m or {}).get("billing") == "subscription":
-                bits.append("plan quota")
+                # Which plan pays is the whole distinction now that more than one
+                # can. A vendor id carries its provider as the prefix; a bare id
+                # is the Claude plan. "plan quota" on both would say nothing.
+                vendor = mid.split("/")[0] if "/" in mid else ""
+                prov = cat.get("providers", {}).get(vendor, {})
+                bits.append("%s quota" % (prov.get("label") or vendor.title()
+                                          or "plan"))
             elif p and isinstance(p[0], (int, float)) and p[0] < 0:
                 bits.append("priced by whatever it selects")
             elif p:
@@ -331,7 +384,17 @@ def main():
     a.add_argument("--no-zdr", action="store_true",
                    help="model has no zero-data-retention provider")
     a.add_argument("--subscription", action="store_true",
-                   help="an Anthropic id billed to the plan; skips the OpenRouter lookup")
+                   help="a plan-billed id, not sold per token; skips the OpenRouter "
+                        "lookup. Bare id means Anthropic — for an outside "
+                        "subscription use --provider instead")
+    a.add_argument("--provider", metavar="NAME",
+                   help="route to an outside subscription declared under 'providers' "
+                        "in models.json (e.g. kimi). Implies --subscription, and "
+                        "prefixes the id with NAME/ since that prefix is what routes it")
+    a.add_argument("--upstream-id", metavar="ID",
+                   help="the model name to put on the wire when it differs from the "
+                        "picker id, e.g. 'k3[1m]' — brackets are Claude Code's own "
+                        "context-variant syntax and cannot survive in a picker id")
     a.set_defaults(fn=cmd_add)
 
     r = sub.add_parser("remove", help="remove a model")

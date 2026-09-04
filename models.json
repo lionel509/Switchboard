@@ -2,6 +2,22 @@
   "_comment": "Edit with switchboard.py (add/remove/list), or by hand. Prices are USD per 1M tokens, in/out, recorded when the entry was added — they drift, so treat them as ordering, not billing. 'good_at' is fed verbatim to the router model when Auto picks.",
   "router_model": "~deepseek/deepseek-v4-flash-latest",
   "fallback": "claude-sonnet-5",
+  "_providers_note": "A vendor with its own Anthropic-compatible endpoint and its own subscription, matched on the first segment of the model id. path_prefix is joined to the incoming path, so /coding + /v1/messages -> /coding/v1/messages. The key file is read per request and never cached; your claude.ai token is stripped before the request leaves the machine. Set cache_control false if a vendor rejects the markers, and add to drop_fields anything it 400s on.",
+  "providers": {
+    "kimi": {
+      "host": "api.kimi.com",
+      "path_prefix": "/coding",
+      "key_file": "~/.config/kimi-key",
+      "auth_header": "x-api-key",
+      "cache_control": true,
+      "drop_fields": [
+        "context_management",
+        "container",
+        "mcp_servers"
+      ],
+      "label": "Kimi"
+    }
+  },
   "family_labels": {
     "deepseek": "DeepSeek",
     "gemini": "Google Gemini",
@@ -21,7 +37,7 @@
       "deepseek/deepseek-v4-pro",
       "~google/gemini-pro-latest",
       "~z-ai/glm-latest",
-      "moonshotai/kimi-k3"
+      "kimi/k3"
     ]
   },
   "_lineup_note": "Used by 'picker --apply': the WHOLE /model menu, in order, weighted by how likely each is to be picked by hand. Ten rows is the limit before Claude Code collapses the rest behind '… +N models'. A row with only a 'model' key fills its label and description from the catalog (blurb + price); give label/description explicitly for Claude ids, which are not catalog entries. Anything left out is still routable by Auto.",
@@ -61,7 +77,7 @@
       "model": "~google/gemini-pro-latest"
     },
     {
-      "model": "moonshotai/kimi-k3"
+      "model": "kimi/k3"
     },
     {
       "model": "deepseek/deepseek-v4-pro"
@@ -203,6 +219,28 @@
       "blurb": "Agentic tool use and coding, mid price"
     },
     {
+      "id": "kimi/k3",
+      "upstream_id": "k3[1m]",
+      "name": "Kimi K3 (sub)",
+      "family": "kimi",
+      "tier": "pro",
+      "billing": "subscription",
+      "price": [
+        0,
+        0
+      ],
+      "context": 1048576,
+      "good_at": "building user interfaces - React, CSS, layout, data visualisation, marketing pages. Costs no cash. Consumes the SEPARATE Kimi subscription quota, not Claude quota, so sending work here preserves Claude quota rather than spending it.",
+      "specialties": [
+        "frontend",
+        "ui",
+        "css",
+        "react"
+      ],
+      "source": "Arena WebDev #1 (1679) Jul 2026; Vercel Next.js eval tied #1 at 92%",
+      "blurb": "Frontend — React, CSS, layout"
+    },
+    {
       "id": "moonshotai/kimi-k3",
       "name": "Kimi K3",
       "family": "kimi",
@@ -212,7 +250,7 @@
         15.0
       ],
       "context": 1048576,
-      "good_at": "building user interfaces - React, CSS, layout, data visualisation, marketing pages",
+      "good_at": "same model as kimi/k3 but billed per token through OpenRouter. Only worth picking as overflow, when the Kimi subscription's rate-limit window is exhausted. building user interfaces - React, CSS, layout, data visualisation, marketing pages",
       "specialties": [
         "frontend",
         "ui",
@@ -242,7 +280,7 @@
     "low": "~z-ai/glm-latest",
     "medium": "deepseek/deepseek-v4-pro",
     "high": "~google/gemini-pro-latest",
-    "xhigh": "moonshotai/kimi-k3",
+    "xhigh": "kimi/k3",
     "max": "openrouter/auto"
   }
 }
