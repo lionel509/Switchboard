@@ -130,7 +130,7 @@ read later as a vendor outage. Press Enter and it reads the clipboard, takes the
 and echoes a masked preview — so the mistake is visible before the round trip. Typing is
 still there for anyone who would rather not put a live credential on the clipboard.
 
-**`key_pattern` warns, it never blocks.** It is deliberately loose (`^[A-Za-z0-9._:-]{16,}$`)
+**`key_pattern` warns and asks, it never rejects outright.** It is deliberately loose (`^[A-Za-z0-9._:-]{16,}$`)
 — enough to catch a pasted URL, command or sentence, and nothing more. A vendor may change
 its key shape without telling anyone, so a shape guess must never be able to lock out a key
 that works.

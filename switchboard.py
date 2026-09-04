@@ -418,13 +418,15 @@ def pick_provider(cat):
     is the same information one keystroke later than it is useful. The names are
     not memorable and the set is small, so show them with their key status and
     take a number.
+
+    The list is printed even when only one provider is declared. Auto-selecting
+    the single row saves a keystroke and hides the two things worth seeing first:
+    which vendor is about to be signed into, and whether it already has a key.
     """
     rows = provider_rows(cat)
     if not rows:
         print("no providers declared under 'providers' in models.json", file=sys.stderr)
         return None
-    if len(rows) == 1:
-        return rows[0][0]
     print("Outside subscriptions:")
     for i, (name, p, has) in enumerate(rows, 1):
         print("  %d. %-8s %-28s %s"
