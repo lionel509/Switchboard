@@ -220,7 +220,7 @@
     },
     {
       "id": "kimi/k3",
-      "upstream_id": "k3[1m]",
+      "upstream_id": "k3-256k",
       "name": "Kimi K3 (sub)",
       "family": "kimi",
       "tier": "pro",
@@ -229,7 +229,7 @@
         0,
         0
       ],
-      "context": 1048576,
+      "context": 262144,
       "good_at": "building user interfaces - React, CSS, layout, data visualisation, marketing pages. Costs no cash. Consumes the SEPARATE Kimi subscription quota, not Claude quota, so sending work here preserves Claude quota rather than spending it.",
       "specialties": [
         "frontend",
@@ -238,7 +238,8 @@
         "react"
       ],
       "source": "Arena WebDev #1 (1679) Jul 2026; Vercel Next.js eval tied #1 at 92%",
-      "blurb": "Frontend — React, CSS, layout"
+      "blurb": "Frontend — React, CSS, layout",
+      "_tier_note": "upstream_id/context track the PLAN TIER, not the model. Moderato and Allegretto do not include K3's 1M window; Allegro and Vivace do. On upgrading, set upstream_id to 'k3[1m]' and context to 1048576 — those two fields are the whole change."
     },
     {
       "id": "moonshotai/kimi-k3",

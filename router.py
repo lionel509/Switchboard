@@ -590,6 +590,20 @@ class Router(BaseHTTPRequestHandler):
             headers = self.headers_for_direct(prov, key)
             wire = UPSTREAM_ID.get(model) or model.split("/", 1)[-1]
             body = sanitize_native(body, prov, wire)
+            # Claude Code fixes its compaction window ONCE per session, from the
+            # model it started on. Switching mid-conversation into a smaller model
+            # therefore keeps packing the old window, and the vendor's own error
+            # for that is unhelpful and arrives after the round trip. Catch it here
+            # while there is still something actionable to say.
+            limit = (BY_ID.get(model) or {}).get("context")
+            approx = len(body) // 4                    # ~4 chars per token
+            if limit and approx > limit:
+                return self.fail(413,
+                    "this conversation is ~%s tokens and %s holds %s. Claude Code "
+                    "sets its context window once per session, so switching into a "
+                    "smaller model mid-conversation overflows it. Run /compact, or "
+                    "switch back to a Claude model and continue there."
+                    % ("{:,}".format(approx), model, "{:,}".format(limit)))
             target = vendor            # log each subscription as its own pool
         elif target == "openrouter":
             key = or_key()

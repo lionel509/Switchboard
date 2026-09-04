@@ -121,6 +121,15 @@ here, the subscription is one more row in `/model`, and Auto can weigh it agains
 own syntax for a context variant — an id carrying them can be rewritten before it reaches the
 router. So the picker id stays bare (`kimi/k3`) and `upstream_id` carries what goes on the wire.
 
+**`upstream_id` and `context` track the plan tier, not the model.** Kimi's 1M window ships on
+Allegro and above; lower tiers get `k3-256k`. On an upgrade those two catalog fields are the
+entire change.
+
+**Context overflow is refused locally.** Claude Code fixes its compaction window once per
+session, from the model it started on, so switching mid-conversation into a smaller model keeps
+packing the old window. A direct request exceeding the catalog `context` gets a 413 from the
+router with something actionable in it, rather than the vendor's own late and opaque error.
+
 **`sanitize_native` is not `sanitize`.** The OpenRouter path injects a `provider` preference
 block, which is OpenRouter's own extension and a 400 anywhere else. A vendor endpoint speaks
 the Messages API by definition, so its body is left intact apart from the model name and
