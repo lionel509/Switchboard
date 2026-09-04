@@ -6,6 +6,7 @@
     switchboard.py add qwen/qwen3.8-flash --no-zdr --good-at "cheap agentic coding"
     switchboard.py remove qwen/qwen3.8-flash
     switchboard.py sync
+    switchboard                     # full-screen editor (no subcommand)
     switchboard.py login            # pick from a list, open the key page
     switchboard.py login --all      # is every provider actually signed in?
 
@@ -994,6 +995,12 @@ def cmd_login(args):
     return 0
 
 
+def cmd_ui(args):
+    """Full-screen editor. Passing this module in avoids a circular import."""
+    import tui                      # sys.path[0] is this file's directory
+    return tui.run(sys.modules[__name__])
+
+
 def cmd_sync(args):
     sync = os.path.join(HERE, "sync-models.py")
     return os.spawnv(os.P_WAIT, sys.executable, [sys.executable, sync])
@@ -1002,7 +1009,7 @@ def cmd_sync(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    sub = ap.add_subparsers(dest="cmd", required=True)
+    sub = ap.add_subparsers(dest="cmd", required=False)
 
     sub.add_parser("list", help="show the catalog").set_defaults(fn=cmd_list)
 
@@ -1076,8 +1083,13 @@ def main():
     sub.add_parser("sync", help="publish the catalog to the picker cache"
                    ).set_defaults(fn=cmd_sync)
 
+    sub.add_parser("ui", help="full-screen editor — the default with no subcommand"
+                   ).set_defaults(fn=cmd_ui)
+
     args = ap.parse_args()
-    return args.fn(args)
+    # No subcommand opens the editor. The subcommands still do everything it does;
+    # this is just the difference between editing what you can see and scripting it.
+    return (args.fn if getattr(args, "fn", None) else cmd_ui)(args)
 
 
 if __name__ == "__main__":

@@ -275,6 +275,40 @@ catalog, no OpenRouter key. Auto degrades to a working model rather than to an e
 > because it is cheaper. That is also why `CLAUDE_ROUTER_AUTO_STRONG` defaults to an Anthropic
 > model: there is no reason to pay OpenRouter for the hard turns.
 
+## The editor
+
+`switchboard` with no subcommand opens a full-screen editor. The subcommands still do
+everything it does — this exists because their equivalents are long: `add` carries ten
+flags, and putting a model in the picker is three chained commands.
+
+```
+ Switchboard                        router: deepseek-flash   fallback: claude-sonnet-5
+ PROVIDERS
+   kimi       api.kimi.com/coding            -- no key     oauth
+ MODELS
+   -  claude-opus-5                      opus    claude quota    Claude Opus
+  [x] ~deepseek/deepseek-v4-flash-latest flash   $0.05/$0.16     DeepSeek Flash
+  [x] kimi/k3                            pro     kimi quota      Kimi K3 (sub)
+      good at: building user interfaces - React, CSS, layout, data visualisation
+      * frontend, ui, css, react
+ up/dn move  space pick  enter edit  a add  d del  l login  s save+sync  q quit
+```
+
+`space` toggles a picker row, `enter` opens a field editor (name, blurb, tier, good-at,
+specialties, evidence), `l` or `enter` on a provider runs the sign-in flow, and `s` writes
+`models.json` and syncs. Quitting with unsaved edits asks first. curses from the standard
+library, so the repo stays dependency-free.
+
+> [!note]
+> **`ESC` is deliberately not bound to quit.** `keypad(True)` puts the terminal into
+> application mode, so every arrow key arrives as an escape sequence; if one is ever
+> delivered split, `getch` returns a bare `27`. Binding that to quit would discard unsaved
+> edits on a keystroke the user believes is "move down". `q` quits; `ESC` only backs out of
+> an overlay or cancels a prompt.
+
+Claude rows show `-` rather than a checkbox — they are already in the picker natively, and
+publishing them again would duplicate every Claude row, so the editor refuses the toggle.
+
 ## Models
 
 `models.json` is the catalog: what appears in the picker, and what Auto may choose from. Manage
