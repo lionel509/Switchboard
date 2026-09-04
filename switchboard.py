@@ -54,7 +54,7 @@ def cmd_list(args):
     print("fallback     : %s" % cat.get("fallback", "(none)"))
     for name, p in sorted(cat.get("providers", {}).items()):
         kf = p.get("key_file", "")
-        mark = "✓" if read_keyfile(kf) else "✗ no key — run: switchboard.py login " + name
+        mark = "✓" if read_keyfile(kf) else "✗ no key — run: switchboard login " + name
         print("subscription : %s -> %s%s  (key: %s %s)"
               % (name, p.get("host", "?"), p.get("path_prefix", ""), kf or "?", mark))
     print()
@@ -480,7 +480,9 @@ def prompt_key(name, prov):
               "pay-as-you-go key from the same account looks identical and 401s "
               "against this endpoint." % label)
 
-    has_clip = clipboard() is not None
+    # Whether a clipboard tool exists, NOT what is on the clipboard. Calling
+    # clipboard() here would read a credential the user may never choose to use.
+    has_clip = any(shutil.which(c) for c in ("pbpaste", "wl-paste", "xclip"))
     if has_clip:
         print("\nCopy the key, then press Enter and I will read it from the "
               "clipboard.\nOr type it here instead — it is not echoed and never "
