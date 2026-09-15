@@ -13,7 +13,7 @@ Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
 and is stripped on both third-party paths — it never leaves this machine toward
 OpenRouter or a vendor endpoint.
 """
-import hashlib, http.client, json, os, sys, threading, time
+import base64, hashlib, http.client, json, os, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -495,6 +495,187 @@ def or_key():
     return read_key(KEYFILE)
 
 
+# --- credential renewal -------------------------------------------------
+# The router still does not speak OAuth. It asks switchboard -- which owns the
+# flow -- to mint a new access token, then re-reads the key file exactly as
+# before. Without this a vendor token dying mid-run surfaces as a 401 the client
+# can only retry into, which is what it was doing: an agent would work for
+# fifteen minutes and then stop, signed out, with every retry equally dead.
+
+RENEW_MARGIN = 300          # renew a token with less than this much life left
+_renew_locks = {}
+_locks_guard = threading.Lock()
+
+
+def _renew_lock(vendor):
+    with _locks_guard:
+        return _renew_locks.setdefault(vendor, threading.Lock())
+
+
+def expiring(key, margin=RENEW_MARGIN):
+    """True if `key` is a JWT that is spent, or nearly.
+
+    Only the payload is read, and only its `exp`. A credential that is not a JWT
+    has no expiry to inspect -- those are left to the 401 path, which catches the
+    same failure a few hundred milliseconds later.
+    """
+    try:
+        parts = key.split(".")
+        if len(parts) < 3 or not key.startswith("ey"):
+            return False
+        pad = parts[1] + "=" * (-len(parts[1]) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(pad)).get("exp")
+        if exp is None:
+            return False
+        exp = float(exp)
+        if exp > 1e11:                     # milliseconds
+            exp /= 1000.0
+        return exp - time.time() < margin
+    except Exception:
+        return False                       # unreadable is not expired
+
+
+def renew_key(vendor, prov, stale):
+    """A fresh access token for `vendor`, or None. Serialised per provider.
+
+    The lock matters more than it looks. A refresh token is rotated on use, so
+    two renewals racing means the second invalidates the first and both sessions
+    are signed out -- exactly what a fan-out of parallel subagents would cause.
+    Whoever waits re-reads the file first: if the key changed underneath, another
+    thread already renewed and that token is used instead of burning a second.
+    """
+    if not prov.get("oauth"):
+        return None                        # a static key cannot be renewed
+    with _renew_lock(vendor):
+        current = read_key(prov.get("key_file", ""))
+        if current and current != stale:
+            return current
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            if here not in sys.path:
+                sys.path.insert(0, here)
+            from switchboard import oauth_refresh, save_oauth
+        except Exception as e:
+            sys.stderr.write("renew %s: switchboard unavailable (%s)\n" % (vendor, e))
+            return None
+        try:
+            tok = oauth_refresh(vendor, prov)
+            if not tok:
+                return None                # reason already on stderr
+            save_oauth(vendor, prov, tok)
+        except Exception as e:
+            sys.stderr.write("renew %s: %s\n" % (vendor, e))
+            return None
+        sys.stderr.write("renewed %s access token\n" % vendor)
+        return tok.get("access_token")
+
+
+# --- Subscription quota ------------------------------------------------------
+# A provider can declare "quota": {"path": ..., "interval": ...}. After serving
+# (or being refused by) that vendor, the router polls the endpoint with the
+# provider's own credential and rewrites <logdir>/<vendor>-limits.json beside
+# requests.log. That is how the notch shows plan quota while holding no keys of
+# its own: same folder as the log, so the one folder grant already covers it.
+_quota_last = {}                    # vendor -> monotonic time of last attempt
+_quota_lock = threading.Lock()
+
+
+def quota_file(vendor):
+    return os.path.join(os.path.dirname(LOGFILE), "%s-limits.json" % vendor)
+
+
+def flatten_quota(payload):
+    """Normalise a quota payload to the limits-file shape. None on an unknown
+    shape, and the old file is left standing -- a stale meter beats a vanished
+    one.
+
+    Kimi (/coding/v1/usages) answers:
+
+      {"limits": [{"window": {"duration": 300, ...}, "detail": {...}}],
+       "usages": {"limit_5h":         {"used_ratio": 0.231, "reset_time": "..."},
+                  "limit_month_total": {...},
+                  "limit_month_code":  {...}}}
+
+    Ratios become percents; reset times stay ISO strings. `month_code` is kept
+    on record although the panel displays `month_total` -- they count different
+    pools against different denominators, and the total is the one nearer its
+    ceiling today, so it is the one that would actually run out first.
+    """
+    usages = payload.get("usages") or {}
+    five = usages.get("limit_5h") or {}
+    if five.get("used_ratio") is None:
+        return None
+    month = usages.get("limit_month_total") or {}
+    month_code = usages.get("limit_month_code") or {}
+    out = {"five_hour_pct": round(float(five["used_ratio"]) * 100, 1),
+           "five_hour_resets_at": five.get("reset_time"),
+           "month_pct": round(float(month.get("used_ratio") or 0) * 100, 1),
+           "month_resets_at": month.get("reset_time")}
+    if month_code.get("used_ratio") is not None:
+        out["month_code_pct"] = round(float(month_code["used_ratio"]) * 100, 1)
+        out["month_code_resets_at"] = month_code.get("reset_time")
+    return out
+
+
+def fetch_quota(vendor, force=False):
+    """Poll one vendor's quota endpoint and rewrite its limits file.
+
+    The number moves on the scale of hours, so the per-vendor throttle is finer
+    than the display needs; setting the timestamp before the fetch also makes it
+    the in-flight guard, so two threads cannot double-poll.
+    """
+    prov = PROVIDERS.get(vendor) or {}
+    quota = prov.get("quota") or {}
+    path = quota.get("path")
+    if not path:
+        return
+    interval = int(quota.get("interval", 60))
+    with _quota_lock:
+        now = time.monotonic()
+        if not force and now - _quota_last.get(vendor, 0) < interval:
+            return
+        _quota_last[vendor] = now
+    key = read_key(prov.get("key_file", ""))
+    if not key:
+        return
+    prefix = prov.get("auth_prefix", "")
+    try:
+        conn = http.client.HTTPSConnection(prov["host"], timeout=30)
+        conn.request("GET", path, headers={
+            prov.get("auth_header", "x-api-key"):
+                (prefix + " " + key) if prefix else key})
+        resp = conn.getresponse()
+        raw = resp.read()
+        conn.close()
+        if resp.status != 200:
+            return
+        flat = flatten_quota(json.loads(raw))
+    except Exception:
+        return
+    if flat is None:
+        return
+    flat["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    tmp = quota_file(vendor) + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(json.dumps(flat) + "\n")
+        os.replace(tmp, quota_file(vendor))
+    except OSError:
+        pass
+
+
+def maybe_fetch_quota(upstream):
+    """Poll the plan's usage meters after touching that plan.
+
+    Quota only ever changes by using the plan, so the moments that can move the
+    number are exactly the requests routed there -- including a 429, which is
+    the one everyone then watches the meter for. Off the response path in a
+    daemon thread, so it costs the stream nothing.
+    """
+    if upstream in PROVIDERS and (PROVIDERS[upstream].get("quota") or {}).get("path"):
+        threading.Thread(target=fetch_quota, args=(upstream,), daemon=True).start()
+
+
 def sanitize_native(body, prov, wire_model):
     """Rewrite a request for a vendor's own Anthropic-compatible endpoint.
 
@@ -626,6 +807,7 @@ class Router(BaseHTTPRequestHandler):
         one vendor's request to another.
         """
         target = upstream_for(model)
+        vendor = key = None
         if body:
             try:
                 req = json.loads(body)
@@ -638,6 +820,8 @@ class Router(BaseHTTPRequestHandler):
             prov = PROVIDERS[vendor]
             keyfile = prov.get("key_file", "")
             key = read_key(keyfile)
+            if key and expiring(key):
+                key = renew_key(vendor, prov, key) or key
             if not key:
                 return "no %s key at %s" % (vendor, keyfile or "<unset>")
             host = prov["host"]
@@ -666,7 +850,7 @@ class Router(BaseHTTPRequestHandler):
                 del headers[k]
             headers["Content-Length"] = str(len(body))
         return {"model": model, "upstream": target, "host": host, "path": path,
-                "headers": headers, "body": body}
+                "headers": headers, "body": body, "vendor": vendor, "key": key}
 
     def headers_passthrough(self):
         """Everything the client sent, minus hop-by-hop. Credential untouched."""
@@ -701,6 +885,42 @@ class Router(BaseHTTPRequestHandler):
             h["anthropic-version"] = "2023-06-01"
         return h
 
+    def issue(self, method, att, rec):
+        """One attempt, renewing a dead vendor credential once before giving up.
+
+        A 401 is not a failover case: the model has capacity and the request is
+        fine, the token has simply expired. Failing over would answer from a
+        different model, and returning it makes the client retry a credential
+        that cannot recover -- so it is retried here, on the same upstream, with
+        a fresh token. Safe for the same reason failover is: nothing has been
+        written to the client yet, so the first attempt can be abandoned
+        silently. Only the vendor paths renew; the Anthropic path forwards the
+        client's own credential and is not the router's to refresh.
+        """
+        for renewed in (False, True):
+            conn = http.client.HTTPSConnection(att["host"], timeout=900)
+            conn.request(method, att["path"], body=att["body"],
+                         headers=att["headers"])
+            resp = conn.getresponse()
+            if resp.status != 401 or renewed or not att.get("vendor"):
+                return conn, resp
+            prov = PROVIDERS.get(att["vendor"]) or {}
+            fresh = renew_key(att["vendor"], prov, att.get("key"))
+            if not fresh:
+                return conn, resp          # nothing better to answer with
+            prefix = prov.get("auth_prefix", "")
+            att["headers"][prov.get("auth_header", "x-api-key")] = (
+                prefix + " " + fresh if prefix else fresh)
+            att["key"] = fresh
+            rec["renewed"] = att["vendor"]
+            try:
+                resp.read()                # drain before reusing the socket
+                conn.close()
+            except Exception:
+                pass
+        return conn, resp
+
+
     def relay(self, method, prepared, requested=""):
         """Issue attempts in order until one has capacity, then stream it.
 
@@ -722,10 +942,7 @@ class Router(BaseHTTPRequestHandler):
             if i:
                 rec["failover_from"] = prepared[i - 1]["model"]
             try:
-                conn = http.client.HTTPSConnection(att["host"], timeout=900)
-                conn.request(method, att["path"], body=att["body"],
-                             headers=att["headers"])
-                resp = conn.getresponse()
+                conn, resp = self.issue(method, att, rec)
             except Exception as e:
                 rec.update(status=502, error=str(e), ms=int((time.time() - t0) * 1000))
                 log_request(rec)
@@ -736,6 +953,7 @@ class Router(BaseHTTPRequestHandler):
                 rec.update(status=resp.status, failed_over_to=prepared[i + 1]["model"],
                            ms=int((time.time() - t0) * 1000))
                 log_request(rec)
+                maybe_fetch_quota(att["upstream"])
                 try:
                     resp.read()          # drain so the socket can be closed cleanly
                     conn.close()
@@ -796,6 +1014,7 @@ class Router(BaseHTTPRequestHandler):
         if usage.get("cost") is not None:
             rec["cost"] = usage["cost"]
         log_request(rec)
+        maybe_fetch_quota(upstream)
 
         self.log_message("%s %s -> %s %s (%dms%s)", rec["status"], model or path,
                          provider or host, used or "", rec["ms"],
@@ -869,4 +1088,10 @@ if __name__ == "__main__":
             sys.stderr.write("  ! %s has no key at %s — its models will fail "
                              "until that file exists (chmod 600)\n"
                              % (_name, _p.get("key_file") or "<unset>"))
+        # Get each plan's meters on record now rather than at first traffic --
+        # the file predating the next request is what lets the notch show quota
+        # for a plan nobody has spent today.
+        if (_p.get("quota") or {}).get("path"):
+            threading.Thread(target=fetch_quota, args=(_name, True),
+                             daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", PORT), Router).serve_forever()

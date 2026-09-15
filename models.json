@@ -51,7 +51,12 @@
         "_headers_note": "Measured 2026-09-04: auth.kimi.com accepts device_authorization and the token poll with NO vendor identity headers — identical responses with and without X-Msh-Platform/Version. So none are sent. Only genuine device info goes, and switchboard does not claim to be kimi_cli. If the backend ever starts requiring an identity, add it here and the disclosure fires again.",
         "headers": {}
       },
-      "auth_prefix": "Bearer"
+      "auth_prefix": "Bearer",
+      "quota": {
+        "path": "/coding/v1/usages",
+        "interval": 60,
+        "_note": "The plan's own usage meters, polled by the router after each Kimi request and flattened into kimi-limits.json beside the log for the notch. Verified live 2026-09-15: answers usages.limit_5h / limit_month_total / limit_month_code, each {used_ratio, reset_time}; the same provider credential authenticates it. The lookalikes /coding/v1/usage, /coding/v1/quota and /coding/v1/users/me/quota are all 404. Responses carry no rate-limit headers, which is why this separate poll exists at all."
+      }
     }
   },
   "family_labels": {
@@ -66,14 +71,11 @@
   "picker": {
     "families": [],
     "models": [
-      "~deepseek/deepseek-v4-flash-latest",
-      "~google/gemini-flash-latest",
       "qwen/qwen3.8-flash",
       "~x-ai/grok-latest",
       "deepseek/deepseek-v4-pro",
-      "~google/gemini-pro-latest",
-      "~z-ai/glm-latest",
-      "kimi/k3"
+      "kimi/k3",
+      "~z-ai/glm-latest"
     ]
   },
   "_lineup_note": "Used by 'picker --apply': the WHOLE /model menu, in order, weighted by how likely each is to be picked by hand. Ten rows is the limit before Claude Code collapses the rest behind '… +N models'. A row with only a 'model' key fills its label and description from the catalog (blurb + price); give label/description explicitly for Claude ids, which are not catalog entries. Anything left out is still routable by Auto.",
@@ -264,10 +266,10 @@
     },
     {
       "id": "kimi/k3",
-      "upstream_id": "k3-256k",
+      "upstream_id": "k3",
       "upstream_candidates": [
         {
-          "id": "k3[1m]",
+          "id": "k3",
           "context": 1048576
         },
         {
@@ -283,7 +285,7 @@
         0,
         0
       ],
-      "context": 262144,
+      "context": 1048576,
       "good_at": "building user interfaces - React, CSS, layout, data visualisation, marketing pages. Costs no cash. Consumes the SEPARATE Kimi subscription quota, not Claude quota, so sending work here preserves Claude quota rather than spending it.",
       "specialties": [
         "frontend",
