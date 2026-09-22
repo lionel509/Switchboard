@@ -36,6 +36,16 @@
       "verify_url": "https://openrouter.ai/api/v1/key",
       "console_url": "https://openrouter.ai/settings/keys",
       "note": "metered per token"
+    },
+    {
+      "name": "openrouter-nonzdr",
+      "label": "OpenRouter (no ZDR)",
+      "host": "openrouter.ai",
+      "key_file": "~/.config/openrouter-key-nonzdr",
+      "verify_url": "https://openrouter.ai/api/v1/key",
+      "console_url": "https://openrouter.ai/settings/keys",
+      "note": "metered; a workspace with no ZDR guardrail",
+      "detail": "Sent ONLY for models flagged zdr:false, which the folder policy must already permit. The guardrail lives on the workspace, not the request, so a second key in a permissive workspace is the only way to reach a non-ZDR provider. Rotate by overwriting the file."
     }
   ],
   "providers": {

@@ -18,6 +18,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
 KEYFILE  = os.path.expanduser("~/.config/openrouter-key")
+# A second OpenRouter key whose workspace has no zero-data-retention guardrail.
+# Only models flagged zdr:false are sent with it -- see or_key().
+NONZDR_KEYFILE = os.path.expanduser("~/.config/openrouter-key-nonzdr")
 LOGFILE  = os.path.expanduser(os.environ.get(
     "CLAUDE_ROUTER_LOG", "~/.local/share/claude-router/requests.log"))
 # substrings of OpenRouter model ids to surface in /model
@@ -359,20 +362,26 @@ def ask_router_model(task, cands=None):
     return None
 
 
-def resolve_auto(req):
-    """Map the auto pseudo-model onto a real one. One-way: never downgrades."""
+def resolve_auto(req, pol=None):
+    """Map the auto pseudo-model onto a real one. One-way: never downgrades.
+
+    The folder's data policy narrows what Auto may choose from rather than
+    refusing its pick afterwards. Auto exists to land on something workable, so
+    a policy that rules a model out should steer the choice, not 403 the turn.
+    """
     key = conv_key(req)
     with _auto_lock:
         pinned = _auto_pins.get(key)
     if pinned == FALLBACK:
         return FALLBACK                  # escalation is permanent for this conversation
-    if pinned:
+    if pinned and allowed(pinned, pol or {}):
         chosen = FALLBACK if looks_hard(req) else pinned
     elif looks_hard(req):
         chosen = FALLBACK                # already real work; nothing to decide
     else:
         # First turn: spend one cheap call working out what this task needs.
-        chosen = ask_router_model(task_text(req)) or FALLBACK
+        cands = [m for m in CANDIDATES if allowed(m["id"], pol or {})]
+        chosen = ask_router_model(task_text(req), cands) or FALLBACK
     with _auto_lock:
         _auto_pins[key] = chosen
         if len(_auto_pins) > 512:        # bounded; oldest insertions drop first
@@ -407,7 +416,7 @@ def family_of(fam):
                   key=lambda m: (m.get("price") or [0])[0])
 
 
-def resolve_family(req, fam, tier=None):
+def resolve_family(req, fam, tier=None, pol=None):
     """One picker row per family; the tier is chosen per task.
 
     Claude Code's picker cannot put variants behind a row — the arrow-key adjust
@@ -418,7 +427,7 @@ def resolve_family(req, fam, tier=None):
     A folder that names a tier settles it outright: no router call, no latency,
     and the answer is the same every turn. Default is pro, set per folder.
     """
-    cands = family_of(fam)
+    cands = [m for m in family_of(fam) if allowed(m["id"], pol or {})]
     if not cands:
         return FALLBACK
     if tier:
@@ -436,7 +445,7 @@ def resolve_family(req, fam, tier=None):
     return chosen
 
 
-def resolve_arrow(req):
+def resolve_arrow(req, pol=None):
     """Map the picker's effort level onto a model. This is the arrow-key row.
 
     No conversation pin: the whole point is that ←/→ switches the model mid
@@ -444,13 +453,16 @@ def resolve_arrow(req):
     """
     eff = (req.get("output_config") or {}).get("effort")
     chosen = ARROW_MAP.get(eff)
-    if chosen:
+    if chosen and allowed(chosen, pol or {}):
         return chosen
-    # Effort absent or unmapped: fall to the highest level that is configured,
-    # since the shortlist is ordered weakest-to-strongest.
+    # Effort absent, unmapped, or ruled out by the folder: fall to the highest
+    # level that is configured AND permitted here. The shortlist is ordered
+    # weakest-to-strongest, so this keeps as much of the arrow's intent as the
+    # policy allows instead of dropping straight to the fallback.
     for lvl in reversed(ARROW_ORDER):
-        if ARROW_MAP.get(lvl):
-            return ARROW_MAP[lvl]
+        cand = ARROW_MAP.get(lvl)
+        if cand and allowed(cand, pol or {}):
+            return cand
     return FALLBACK
 
 
@@ -498,7 +510,21 @@ def read_key(path):
         return None
 
 
-def or_key():
+def or_key(model=None):
+    """The OpenRouter credential, picked by whether the model needs a non-ZDR route.
+
+    An OpenRouter *workspace* carries the zero-data-retention guardrail, and a key
+    belongs to a workspace — so which key is sent decides whether a non-ZDR
+    provider is reachable at all. Keeping the permissive key on its own file means
+    the strict key stays the default: a model has to be flagged zdr:false in the
+    catalog to reach the permissive workspace, and the folder policy has already
+    decided whether such a model may run here at all.
+
+    Falls back to the strict key when no permissive one is installed, so the only
+    cost of not having it is the guardrail refusal you would have had anyway.
+    """
+    if model and (BY_ID.get(model) or {}).get("zdr", True) is False:
+        return read_key(NONZDR_KEYFILE) or read_key(KEYFILE)
     return read_key(KEYFILE)
 
 
@@ -843,12 +869,12 @@ class Router(BaseHTTPRequestHandler):
             if req is not None:
                 model = requested = req.get("model", "") or ""
                 if requested == AUTO_MODEL:
-                    model = resolve_auto(req)
+                    model = resolve_auto(req, pol)
                 elif requested == ARROW_MODEL:
-                    model = resolve_arrow(req)
+                    model = resolve_arrow(req, pol)
                 elif requested.startswith(FAMILY_PREFIX):
                     model = resolve_family(req, requested[len(FAMILY_PREFIX):],
-                                           pol.get("tier"))
+                                           pol.get("tier"), pol)
                 if model != requested:
                     req["model"] = model
                     body = json.dumps(req).encode()
@@ -915,7 +941,7 @@ class Router(BaseHTTPRequestHandler):
                         % ("{:,}".format(approx), model, "{:,}".format(limit)))
             target = vendor            # log each subscription as its own pool
         elif target == "openrouter":
-            key = or_key()
+            key = or_key(model)
             if not key:
                 return "no OpenRouter key at ~/.config/openrouter-key"
             host, path = "openrouter.ai", "/api" + self.path
@@ -929,7 +955,11 @@ class Router(BaseHTTPRequestHandler):
                 del headers[k]
             headers["Content-Length"] = str(len(body))
         return {"model": model, "upstream": target, "host": host, "path": path,
-                "headers": headers, "body": body, "vendor": vendor, "key": key}
+                "headers": headers, "body": body, "vendor": vendor, "key": key,
+                # Audit: a privacy rail is only trustworthy if you can ask later
+                # what actually went to the permissive workspace.
+                "nonzdr": target == "openrouter" and
+                          (BY_ID.get(model) or {}).get("zdr", True) is False}
 
     def headers_passthrough(self):
         """Everything the client sent, minus hop-by-hop. Credential untouched."""
@@ -1016,6 +1046,8 @@ class Router(BaseHTTPRequestHandler):
             last = (i == len(prepared) - 1)
             rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                    "upstream": att["upstream"], "model_requested": att["model"]}
+            if att.get("nonzdr"):
+                rec["nonzdr"] = True
             if requested and requested != att["model"]:
                 rec["auto_from"] = requested
             if i:
