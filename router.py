@@ -93,11 +93,19 @@ PORTABLE = {"model", "messages", "system", "max_tokens", "metadata",
             "stop_sequences", "stream", "temperature", "top_k", "top_p",
             "tools", "tool_choice"}
 
-# Reasoning budget handed to OpenRouter models, in output tokens. These are run
-# at their strongest rather than sliding with the effort setting, because on this
-# setup the ←/→ slider is spent selecting the model instead (see ARROW_MODEL).
+# Default reasoning budget for OpenRouter models, in output tokens, used when a
+# request carries no effort level. When it does, the ←/→ slider scales this via
+# EFFORT_BUDGETS below -- the slider adjusts the chosen model's effort rather
+# than swapping models (ARROW_MODEL still does that, for anyone who wants it).
 # Thinking tokens bill as output tokens, so this is a real cost lever.
 THINKING_BUDGET = int(os.environ.get("CLAUDE_ROUTER_THINKING", "12000"))
+
+# Per-level thinking budgets for the ←/→ slider. Without a level the flat
+# THINKING_BUDGET above applies, which is what every request used to get.
+EFFORT_BUDGETS = CATALOG.get("effort_budgets", {})
+# OpenRouter's reasoning.effort only has three stops, so the five map onto them.
+OR_EFFORT = {"low": "low", "medium": "medium", "high": "high",
+             "xhigh": "high", "max": "high"}
 
 
 def strip_cache_control(node):
@@ -111,6 +119,11 @@ def strip_cache_control(node):
             strip_cache_control(v)
 
 
+def effort_of(req):
+    """The ←/→ slider's level, or None. Claude Code sends it as output_config."""
+    return (req.get("output_config") or {}).get("effort")
+
+
 def sanitize(body):
     """Drop Anthropic-only fields, and cache_control markers, for other models."""
     try:
@@ -118,6 +131,9 @@ def sanitize(body):
     except Exception:
         return body
     model = req.get("model", "")
+    # Read the slider BEFORE trimming: output_config is Anthropic-only, so the
+    # allowlist below drops it, and the level has to survive as a thinking budget.
+    effort = effort_of(req)
     req = {k: v for k, v in req.items() if k in PORTABLE}
     req["provider"] = prefs_for(model)
 
@@ -129,10 +145,23 @@ def sanitize(body):
     # also gives 0 (silently ignored), and an explicit budget gives 222. So
     # without this these models run with NO reasoning whatsoever.
     # Anthropic requires 1024 <= budget_tokens < max_tokens.
+    #
+    # The slider chooses how much of that budget to spend. Without it every
+    # model ran at a flat THINKING_BUDGET regardless of where the dial sat,
+    # which is what made ←/→ look broken on a gateway row.
     mt = req.get("max_tokens") or 0
-    budget = min(THINKING_BUDGET, mt - 1024)
+    want = EFFORT_BUDGETS.get(effort, THINKING_BUDGET) if effort else THINKING_BUDGET
+    budget = min(want, mt - 1024)
     if budget >= 1024:
         req["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        if effort:
+            # OpenRouter's own documented lever, accepted alongside the Anthropic
+            # one; whichever the upstream honours wins.
+            req["reasoning"] = {"effort": OR_EFFORT.get(effort, "medium")}
+    else:
+        # Anthropic rejects a budget under 1024, so the honest encoding of "no
+        # room to think" is off, not an invalid budget.
+        req["thinking"] = {"type": "disabled"}
     return json.dumps(req).encode()
 
 

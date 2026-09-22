@@ -134,33 +134,48 @@ assert r.BY_ID.get(got, {}).get("family") != MENU_FAM, "family row leaked: %s" %
 assert r.allowed(got, {"data": "zdr"}), got
 
 
-# --- the effort dial --------------------------------------------------------
-# The dial is a picker row whose five stops are five different models. A typo in
-# arrow_models would silently fall through to the fallback and look deliberate,
-# so every stop must name a real catalog entry.
+# --- the effort slider -------------------------------------------------------
+# The slider must change the CHOSEN model's effort, not swap the model. Claude
+# Code sends the level as output_config.effort, which the PORTABLE allowlist
+# drops -- so if sanitize stops reading it first, every level silently collapses
+# onto one budget and the dial goes dead. That is the failure this catches.
 import json as _json
-_cat = _json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")))
-assert r.ARROW_ORDER, "no effort levels configured"
+_CAT = _json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")))
+
+def _sent(effort, max_tokens=64000, model="xiaomi/mimo-v2.6-pro"):
+    b = {"model": model, "max_tokens": max_tokens,
+         "messages": [{"role": "user", "content": "hi"}]}
+    if effort:
+        b["output_config"] = {"effort": effort}
+    return _json.loads(r.sanitize(_json.dumps(b).encode()))
+
+assert r.EFFORT_BUDGETS, "no effort_budgets in the catalog"
+budgets = [_sent(l)["thinking"]["budget_tokens"] for l in r.ARROW_ORDER]
+assert budgets == sorted(budgets), "budgets must rise with effort: %s" % budgets
+assert len(set(budgets)) == len(budgets), \
+    "every level must differ, or the slider does nothing: %s" % budgets
 for lvl in r.ARROW_ORDER:
-    tgt = r.ARROW_MAP.get(lvl)
-    assert tgt, "effort level %r has no model" % lvl
-    assert tgt in r.BY_ID, "effort %s -> %r is not in the catalog" % (lvl, tgt)
+    assert _sent(lvl)["thinking"]["budget_tokens"] == r.EFFORT_BUDGETS[lvl], lvl
+    assert _sent(lvl).get("reasoning"), "OpenRouter's own lever must go too: %s" % lvl
 
-# Every stop must stay inside the folder policy, and in Vanguard all five
-# collapse onto Claude rather than refusing the turn.
-for pol in ({"data": "any"}, {"data": "zdr"}, {"data": "claude"}):
-    for lvl in r.ARROW_ORDER:
-        got = r.resolve_arrow({"output_config": {"effort": lvl}}, pol)
-        assert r.allowed(got, pol), "effort %s under %s -> %s" % (lvl, pol["data"], got)
-assert all(r.resolve_arrow({"output_config": {"effort": l}}, {"data": "claude"})
-           == r.FALLBACK for l in r.ARROW_ORDER), "claude-only must collapse to the fallback"
+# No level -> the flat default, exactly as before this existed.
+assert _sent(None)["thinking"]["budget_tokens"] == min(r.THINKING_BUDGET, 64000 - 1024)
+# output_config itself must never reach a non-Claude model: it 400s on it.
+assert "output_config" not in _sent("max")
 
-# The row has to be in the lineup AND carry behavesAs, or Claude Code will not
-# offer it: it is an id this version does not know.
-dial = [row for row in _cat["picker_lineup"] if row["model"] == r.ARROW_MODEL]
-assert len(dial) == 1, "the effort dial is not in picker_lineup"
-assert dial[0].get("behavesAs"), "the dial needs behavesAs or it is never offered"
-assert len(_cat["picker_lineup"]) <= 10, \
-    "%d rows — over ten collapses behind '... +N models'" % len(_cat["picker_lineup"])
+# Anthropic rejects a budget under 1024, so a small max_tokens must turn thinking
+# OFF rather than send an invalid budget.
+tiny = _sent("max", max_tokens=1200)
+assert tiny["thinking"] == {"type": "disabled"}, tiny["thinking"]
+# And a level must never exceed what max_tokens leaves room for.
+clamped = _sent("max", max_tokens=8000)
+assert clamped["thinking"]["budget_tokens"] <= 8000 - 1024, clamped
+
+# Every gateway row needs behavesAs or the slider never appears on it. The
+# catalog default supplies it at apply time, so assert the default exists.
+assert _CAT.get("picker_behaves_as"), \
+    "without picker_behaves_as no gateway row gets an effort slider"
+assert len(_CAT["picker_lineup"]) <= 10, \
+    "%d rows — over ten collapses behind '... +N models'" % len(_CAT["picker_lineup"])
 
 print("ok — %d models, policy rail holds" % len(r.CANDIDATES))

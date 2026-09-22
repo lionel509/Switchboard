@@ -271,8 +271,13 @@ def cmd_apply(args):
         # prompt profile, capability and effort defaults. Without it a gateway id
         # gets no effort slider -- and an unknown model-catalog row is not
         # offered at all. Carried through verbatim; the id sent is unchanged.
-        if row.get("behavesAs"):
-            opt["behavesAs"] = row["behavesAs"]
+        # A gateway id is unknown to Claude Code, so without behavesAs it gets no
+        # effort slider -- the ←/→ dial simply does not appear on the row. The
+        # catalog default applies to every gateway row; a row may override it.
+        behaves = row.get("behavesAs") or (
+            cat.get("picker_behaves_as") if "/" in mid else None)
+        if behaves:
+            opt["behavesAs"] = behaves
         opts.append(opt)
     if not opts:
         print("picker_lineup is empty in models.json — nothing to write",

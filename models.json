@@ -126,12 +126,6 @@
       "description": "Fast workhorse for routine coding · plan quota"
     },
     {
-      "model": "~pick/openrouter",
-      "label": "Effort dial",
-      "description": "←/→ picks the model · GLM → DeepSeek → Gemini Pro → Kimi K3 → Auto",
-      "behavesAs": "claude-opus-4-8"
-    },
-    {
       "model": "~x-ai/grok-latest"
     },
     {
@@ -152,6 +146,9 @@
     },
     {
       "model": "kimi/k2.8"
+    },
+    {
+      "model": "deepseek/deepseek-v4-pro"
     }
   ],
   "_failover_note": "On 402/429/529 the router retries the next model here before answering. 401/403 is NOT included: a bad credential must never silently drain a different quota. A target containing '/' is METERED — failing over to one spends cash, so these are set deliberately, not by default.",
@@ -445,5 +442,15 @@
     "high": "~google/gemini-pro-latest",
     "xhigh": "kimi/k3",
     "max": "openrouter/auto"
-  }
+  },
+  "_effort_note": "The ←/→ effort slider, applied to the model you picked instead of swapping it. Claude Code sends the level as output_config.effort; it is an Anthropic-only field, so sanitize() reads it and translates before trimming. Budgets are THINKING tokens and they bill as output tokens, so this is a real cost lever - raising max is raising a bill. Measured 2026-09-21 on api/v1/messages: {\"thinking\":{\"type\":\"disabled\"}} is honoured (zero thinking emitted), and OpenRouter's own reasoning.effort is accepted too, so both are sent and whichever the upstream honours wins. A level is clamped to max_tokens-1024, which Anthropic requires; below 1024 thinking is disabled outright rather than sent invalid.",
+  "effort_budgets": {
+    "low": 2048,
+    "medium": 6000,
+    "high": 12000,
+    "xhigh": 24000,
+    "max": 48000
+  },
+  "_behaves_as_note": "Applied to every gateway row by picker --apply. behavesAs maps an id Claude Code does not know onto one it does, for prompt profile, capability and effort defaults - and the effort CAPABILITY is what makes the ←/→ slider appear on the row at all. claude-opus-4-8 carries all five stops (effort + xhigh_effort + max_effort) and a lean prompt profile, rather than Opus 5's own prompt bundle, which has no business shaping a request to GLM or DeepSeek. Changes neither the label nor the model id sent on the wire.",
+  "picker_behaves_as": "claude-opus-4-8"
 }
