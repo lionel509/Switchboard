@@ -433,18 +433,6 @@
       ],
       "context": 500000,
       "good_at": "long-running software engineering, agentic coding and knowledge work - pinned successor to the grok-latest alias, 500K context at $1.60/$4.80 per 1M. Pick over grok-latest when 4.7 itself is wanted"
-    },
-    {
-      "id": "z-ai/glm-5.3-flashx",
-      "name": "Z.ai GLM 5.3 FlashX",
-      "family": "glm",
-      "tier": "flash",
-      "price": [
-        0.37,
-        1.25
-      ],
-      "context": 1048576,
-      "good_at": "the fastest GLM - up to 200 tokens/s - for interactive agentic loops and quick tool-use turns where latency matters more than depth. 1M context at $0.37/$1.25 per 1M"
     }
   ],
   "_arrow_note": "The ←/→ row. Claude Code's effort slider reaches the wire as output_config.effort, and a row declared via ANTHROPIC_CUSTOM_MODEL_OPTION with SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort gets that slider even as a gateway id. So one picker row carries this shortlist and the arrows choose between them. Ordered weakest to strongest; an unmapped level falls to the strongest set.",

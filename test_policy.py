@@ -111,14 +111,26 @@ assert r.allowed(got, CLAUDE_POL), "a stale pin escaped the policy: %s" % got
 r._auto_pins.pop(key, None)
 
 # --- family tier preference -------------------------------------------------
-fams = {m.get("family") for m in r.CANDIDATES}
-if "glm" in fams:
-    tiers = {m.get("tier") for m in r.family_of("glm")}
-    if "flash" in tiers:
-        got = r.resolve_family({"messages": []}, "glm", "flash")
-        assert (r.BY_ID[got].get("tier")) == "flash", got
-    if "pro" in tiers:
-        got = r.resolve_family({"messages": []}, "glm", "pro")
-        assert (r.BY_ID[got].get("tier")) == "pro", got
+# The MiMo row in the /model menu is a family row, so "pro by default, flash per
+# folder" is a user-facing promise. Assert on it unconditionally rather than
+# behind an `if`: a family that loses a tier must break this, not skip it.
+MENU_FAM = "mimo"
+tiers = {m.get("tier") for m in r.family_of(MENU_FAM)}
+assert {"flash", "pro"} <= tiers, \
+    "%s is a family row in the menu but no longer offers flash+pro: %s" % (MENU_FAM, tiers)
+for want in ("flash", "pro"):
+    got = r.resolve_family(REQ, MENU_FAM, want, {"data": "any"})
+    assert r.BY_ID[got].get("tier") == want, "%s -> %s" % (want, got)
+
+# Default policy is pro, and that is what the menu row promises.
+assert r.policy_for("")["tier"] == "pro"
+got = r.resolve_family(REQ, MENU_FAM, r.policy_for("")["tier"], {"data": "any"})
+assert r.BY_ID[got].get("tier") == "pro", got
+
+# A family row must not leak a forbidden model: under a strict policy every
+# MiMo is non-ZDR, so it has to fall back off the family entirely.
+got = r.resolve_family(REQ, MENU_FAM, "pro", {"data": "zdr"})
+assert r.BY_ID.get(got, {}).get("family") != MENU_FAM, "family row leaked: %s" % got
+assert r.allowed(got, {"data": "zdr"}), got
 
 print("ok — %d models, policy rail holds" % len(r.CANDIDATES))
