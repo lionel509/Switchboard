@@ -95,7 +95,9 @@
   },
   "_picker_note": "Gateway rows are published after the six built-in Claude rows. Order this list by how often each is picked by hand — Auto is always first. openrouter/auto is deliberately NOT listed: it is a delegation target for Auto (rule 4), not a hand-pick. Picking it directly can never select a subscription model, so every turn costs cash — the inverse of what Auto is for. Launch with --model openrouter/auto if it is ever wanted explicitly.",
   "picker": {
-    "families": [],
+    "families": [
+      "mimo"
+    ],
     "models": [
       "qwen/qwen3.8-flash",
       "~x-ai/grok-latest",
@@ -132,7 +134,9 @@
       "description": "Quick answers and light tool use · plan quota"
     },
     {
-      "model": "qwen/qwen3.8-flash"
+      "model": "~fam/mimo",
+      "label": "Xiaomi MiMo (no ZDR)",
+      "description": "Cheap flagship · pro by default, flash per folder · $0.44/$0.87 per 1M"
     },
     {
       "model": "~z-ai/glm-latest"
