@@ -2,6 +2,21 @@
   "_comment": "Edit with switchboard.py (add/remove/list), or by hand. Prices are USD per 1M tokens, in/out, recorded when the entry was added — they drift, so treat them as ordering, not billing. 'good_at' is fed verbatim to the router model when Auto picks.",
   "router_model": "~deepseek/deepseek-v4-flash-latest",
   "fallback": "claude-sonnet-5",
+  "_policy_note": "Per-folder data policy and family tier, keyed on the working directory Claude Code reports in its own Environment block. Keys are path prefixes; the LONGEST match wins, so a subfolder inherits unless it names itself. data: 'claude' = Anthropic models only (nothing leaves the plan), 'zdr' = third party allowed but only routes with a zero-data-retention provider - this EXCLUDES vendor subscriptions like Kimi, which retain under the vendor's own terms rather than ours, 'any' = no restriction. 'any' is the default because it is what the router did before this existed; an unlisted folder keeps working exactly as it used to. tier: which variant a ~fam/ family row resolves to, default 'pro' - set 'flash' on a folder to take the cheap variant there. A request with no Environment block (a bare API client, not Claude Code) gets the default: the cwd cannot be known, and failing closed there would break every non-Claude-Code caller.",
+  "folder_policy": {
+    "_default": {
+      "data": "any",
+      "tier": "pro"
+    },
+    "~/Documents/Vanguard": {
+      "data": "claude",
+      "_why": "Highest security. Off-limits to Claude sessions by CLAUDE.md anyway; this is the wire-level backstop."
+    },
+    "~/Documents/State Street": {
+      "data": "zdr",
+      "_why": "Finances. Third party is fine but it must not retain."
+    }
+  },
   "_providers_note": "A vendor with its own Anthropic-compatible endpoint and its own subscription, matched on the first segment of the model id. path_prefix is joined to the incoming path, so /coding + /v1/messages -> /coding/v1/messages. The key file is read per request and never cached; your claude.ai token is stripped before the request leaves the machine. Set cache_control false if a vendor rejects the markers, and add to drop_fields anything it 400s on.",
   "_upstreams_note": "Display only — the router never reads this. Credential paths shown in the editor's PROVIDERS panel. Add rows here as more are wired up.",
   "upstreams": [
@@ -65,7 +80,8 @@
     "kimi": "Kimi",
     "qwen": "Qwen",
     "grok": "xAI Grok",
-    "glm": "Z.ai GLM"
+    "glm": "Z.ai GLM",
+    "mimo": "Xiaomi MiMo"
   },
   "_picker_note": "Gateway rows are published after the six built-in Claude rows. Order this list by how often each is picked by hand — Auto is always first. openrouter/auto is deliberately NOT listed: it is a delegation target for Auto (rule 4), not a hand-pick. Picking it directly can never select a subscription model, so every turn costs cash — the inverse of what Auto is for. Launch with --model openrouter/auto if it is ever wanted explicitly.",
   "picker": {
@@ -75,7 +91,9 @@
       "~x-ai/grok-latest",
       "deepseek/deepseek-v4-pro",
       "kimi/k3",
-      "~z-ai/glm-latest"
+      "~z-ai/glm-latest",
+      "kimi/k2.8",
+      "kimi/k3-256k"
     ]
   },
   "_lineup_note": "Used by 'picker --apply': the WHOLE /model menu, in order, weighted by how likely each is to be picked by hand. Ten rows is the limit before Claude Code collapses the rest behind '… +N models'. A row with only a 'model' key fills its label and description from the catalog (blurb + price); give label/description explicitly for Claude ids, which are not catalog entries. Anything left out is still routable by Auto.",
@@ -99,23 +117,21 @@
       "model": "~x-ai/grok-latest"
     },
     {
-      "model": "~auto/auto",
-      "label": "Auto",
-      "description": "Cheapest model that fits, picked per task"
-    },
-    {
       "model": "haiku",
       "label": "Haiku",
       "description": "Quick answers and light tool use · plan quota"
     },
     {
-      "model": "~deepseek/deepseek-v4-flash-latest"
+      "model": "qwen/qwen3.8-flash"
     },
     {
-      "model": "~google/gemini-pro-latest"
+      "model": "~z-ai/glm-latest"
     },
     {
       "model": "kimi/k3"
+    },
+    {
+      "model": "kimi/k2.8"
     },
     {
       "model": "deepseek/deepseek-v4-pro"
@@ -333,6 +349,88 @@
       "good_at": "ANY paid work with no specialist need. Delegates the choice: OpenRouter classifies the prompt into a task type and ranks models by community spend over 7 days, so it tracks the field without this catalog being maintained. Prefer it over naming a specific priced model unless that model has a SPECIALTY the task needs.",
       "source": "openrouter.ai auto router; ranks by trailing-7-day community task spend",
       "blurb": "Delegates the pick to OpenRouter"
+    },
+    {
+      "id": "kimi/k2.8",
+      "name": "Kimi K2.8 (sub)",
+      "family": "kimi",
+      "tier": "pro",
+      "billing": "subscription",
+      "price": [
+        0,
+        0
+      ],
+      "good_at": "the same Kimi subscription quota as K3 but an older, lighter generation - routine coding, edits and tool use where K3 flagship reasoning is overkill. 1M context. Costs no cash; draws the Kimi pool, not Claude quota.",
+      "upstream_id": "kimi-for-coding",
+      "specialties": [
+        "frontend"
+      ],
+      "source": "served under id kimi-for-coding on this account; /v1/models reports 'K2.8 Preview', 1,048,576 ctx, dynamic tools - probed HTTP 200 2026-09-18",
+      "blurb": "Lighter Kimi generation, 1M ctx"
+    },
+    {
+      "id": "kimi/k3-256k",
+      "name": "Kimi K3 256K (sub)",
+      "family": "kimi",
+      "tier": "pro",
+      "billing": "subscription",
+      "price": [
+        0,
+        0
+      ],
+      "good_at": "K3 at a 256K window, which Kimi documents as drawing LESS membership quota than full k3 for routine work. Prefer over kimi/k3 whenever the task fits 256K.",
+      "upstream_id": "k3-256k",
+      "blurb": "K3 at 256K — less Kimi quota"
+    },
+    {
+      "id": "xiaomi/mimo-v2.6-flash",
+      "name": "Xiaomi MiMo Flash",
+      "family": "mimo",
+      "tier": "flash",
+      "price": [
+        0.14,
+        0.28
+      ],
+      "context": 1048576,
+      "good_at": "very cheap bulk mechanical work at 1M context - renames, greps, reformatting, straightforward edits and log sweeps. 309B MoE with 15B active at $0.14/$0.28 per 1M, the second-cheapest rate in the catalog after DeepSeek Flash",
+      "zdr": false
+    },
+    {
+      "id": "xiaomi/mimo-v2.6-pro",
+      "name": "Xiaomi MiMo Pro",
+      "family": "mimo",
+      "tier": "pro",
+      "price": [
+        0.435,
+        0.87
+      ],
+      "context": 1048576,
+      "good_at": "flagship-scale reasoning and agentic coding at a budget price - 1T+ parameters, 1M context, $0.435/$0.87 per 1M. Hard multi-step code work where a frontier model is warranted but its price is not",
+      "zdr": false
+    },
+    {
+      "id": "x-ai/grok-4.7",
+      "name": "xAI Grok 4.7",
+      "family": "grok",
+      "tier": "pro",
+      "price": [
+        1.6,
+        4.8
+      ],
+      "context": 500000,
+      "good_at": "long-running software engineering, agentic coding and knowledge work - pinned successor to the grok-latest alias, 500K context at $1.60/$4.80 per 1M. Pick over grok-latest when 4.7 itself is wanted"
+    },
+    {
+      "id": "z-ai/glm-5.3-flashx",
+      "name": "Z.ai GLM 5.3 FlashX",
+      "family": "glm",
+      "tier": "flash",
+      "price": [
+        0.37,
+        1.25
+      ],
+      "context": 1048576,
+      "good_at": "the fastest GLM - up to 200 tokens/s - for interactive agentic loops and quick tool-use turns where latency matters more than depth. 1M context at $0.37/$1.25 per 1M"
     }
   ],
   "_arrow_note": "The ←/→ row. Claude Code's effort slider reaches the wire as output_config.effort, and a row declared via ANTHROPIC_CUSTOM_MODEL_OPTION with SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort gets that slider even as a gateway id. So one picker row carries this shortlist and the arrows choose between them. Ordered weakest to strongest; an unmapped level falls to the strongest set.",

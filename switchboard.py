@@ -1016,6 +1016,57 @@ def cmd_ui(args):
     return tui.run(sys.modules[__name__])
 
 
+DATA_LEVELS = ("claude", "zdr", "any")
+
+
+def cmd_policy(args):
+    """Per-folder data policy and family tier."""
+    cat = load()
+    pol = cat.setdefault("folder_policy", {"_default": {"data": "any", "tier": "pro"}})
+
+    if args.folder:
+        key = args.folder
+        if key != "_default":
+            full = os.path.abspath(os.path.expanduser(key))
+            home = os.path.expanduser("~")
+            key = "~" + full[len(home):] if full.startswith(home + "/") else full
+            if not os.path.isdir(full):
+                print("no such folder: %s" % full, file=sys.stderr)
+                return 1
+        row = pol.setdefault(key, {})
+        if args.data:
+            row["data"] = args.data
+        if args.tier:
+            row["tier"] = args.tier
+        if args.forget:
+            if key not in pol or key == "_default":
+                print("nothing set for %s" % key, file=sys.stderr)
+                return 1
+            pol.pop(key)
+            print("removed the policy for %s — it falls back to _default" % key)
+        elif not (args.data or args.tier):
+            print("nothing to change; pass --data and/or --tier", file=sys.stderr)
+            return 1
+        save(cat)
+        print("restart the router to apply")
+
+    default = pol.get("_default") or {"data": "any", "tier": "pro"}
+    print("_default%s-> data %-7s tier %s"
+          % (" " * 24, default.get("data", "any"), default.get("tier", "pro")))
+    for path, row in sorted(pol.items()):
+        if path.startswith("_") or not isinstance(row, dict):
+            continue
+        print("%-31s-> data %-7s tier %s"
+              % (path, row.get("data", default.get("data", "any")),
+                 row.get("tier", default.get("tier", "pro"))))
+        if row.get("_why"):
+            print("%s%s" % (" " * 34, row["_why"]))
+    print("\ndata: claude = Anthropic only · zdr = third party but no retention "
+          "(excludes vendor plans) · any = no restriction")
+    print("Longest path prefix wins. An unlisted folder gets _default.")
+    return 0
+
+
 def cmd_sync(args):
     sync = os.path.join(HERE, "sync-models.py")
     return os.spawnv(os.P_WAIT, sys.executable, [sys.executable, sync])
@@ -1088,6 +1139,19 @@ def main():
                         "per task) or one exact model row. Repeatable.")
     p.add_argument("--rm", action="append", metavar="FAMILY|ID", help="remove a row")
     p.set_defaults(fn=cmd_picker)
+
+    ap3 = sub.add_parser("policy", help="per-folder data policy and family tier")
+    ap3.add_argument("folder", nargs="?",
+                     help="folder to configure, or omit to list. Use _default for the "
+                          "rule every unlisted folder gets")
+    ap3.add_argument("--data", choices=DATA_LEVELS,
+                     help="claude = Anthropic only; zdr = third party but no retention; "
+                          "any = no restriction")
+    ap3.add_argument("--tier", help="which variant a family row resolves to here, "
+                                    "e.g. pro or flash")
+    ap3.add_argument("--forget", action="store_true",
+                     help="drop this folder's rule so it inherits _default")
+    ap3.set_defaults(fn=cmd_policy)
 
     ap2 = sub.add_parser("apply", help="write a modelPicker lineup to settings.json, "
                                        "replacing the whole menu so every variant fits")

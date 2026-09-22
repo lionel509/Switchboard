@@ -13,7 +13,7 @@ Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
 and is stripped on both third-party paths — it never leaves this machine toward
 OpenRouter or a vendor endpoint.
 """
-import base64, hashlib, http.client, json, os, sys, threading, time
+import base64, hashlib, http.client, json, os, re, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -407,17 +407,24 @@ def family_of(fam):
                   key=lambda m: (m.get("price") or [0])[0])
 
 
-def resolve_family(req, fam):
+def resolve_family(req, fam, tier=None):
     """One picker row per family; the tier is chosen per task.
 
     Claude Code's picker cannot put variants behind a row — the arrow-key adjust
     on the effort line is its own UI, not something a gateway entry can hook. So
     a family row resolves its own tier the way Auto does, restricted to that
     family, and the list stays one row per family instead of one per variant.
+
+    A folder that names a tier settles it outright: no router call, no latency,
+    and the answer is the same every turn. Default is pro, set per folder.
     """
     cands = family_of(fam)
     if not cands:
         return FALLBACK
+    if tier:
+        want = [m for m in cands if m.get("tier") == tier]
+        if want:
+            return want[0]["id"]
     key = conv_key(req) + ":" + fam
     with _auto_lock:
         pinned = _auto_pins.get(key)
@@ -741,6 +748,66 @@ def upstream_for(model):
     return "openrouter" if "/" in (model or "") else "anthropic"
 
 
+# --- Per-folder data policy -------------------------------------------------
+# Which models a folder is allowed to talk to. Claude Code states its working
+# directory in the Environment block it sends with every request, so the folder
+# is knowable at the wire without the client cooperating.
+POLICY         = CATALOG.get("folder_policy", {})
+POLICY_DEFAULT = {"data": "any", "tier": "pro"}
+CWD_RE = re.compile(r"Primary working directory:\s*([^\r\n\"\\]+)")
+
+
+def cwd_of(body):
+    """The session's working directory, or "" if the request never said."""
+    if not body:
+        return ""
+    m = CWD_RE.search(body.decode("utf-8", "replace"))
+    return m.group(1).strip().rstrip("/") if m else ""
+
+
+def policy_for(cwd):
+    """Longest-prefix folder policy, so a subfolder inherits its vault's rule.
+
+    ponytail: no cwd -> the default. A bare API client sends no Environment
+    block, and failing closed on an unknown cwd would break every non-Claude-Code
+    caller. Tighten only if something other than Claude Code starts talking here.
+    """
+    pol = dict(POLICY.get("_default") or POLICY_DEFAULT)
+    best, found = "", None
+    for path, p in POLICY.items():
+        if path.startswith("_") or not isinstance(p, dict):
+            continue
+        root = os.path.expanduser(path).rstrip("/")
+        if (cwd == root or cwd.startswith(root + "/")) and len(root) >= len(best):
+            best, found = root, p
+    if found:
+        pol.update(found)
+    return pol
+
+
+def allowed(model, pol):
+    """Whether a folder's data policy permits this model.
+
+    claude  Anthropic only -- nothing leaves the plan.
+    zdr     plus OpenRouter routes that have a zero-data-retention provider. A
+            vendor subscription is excluded unless its provider declares
+            "zdr": true, because a plan retains under the vendor's own terms and
+            an undeclared one must not be assumed private.
+    any     no restriction.
+    """
+    data = (pol.get("data") or "any").lower()
+    if data == "any":
+        return True
+    up = upstream_for(model)
+    if up == "anthropic":
+        return True
+    if data == "claude":
+        return False
+    if up.startswith("direct:"):
+        return PROVIDERS.get(up.split(":", 1)[1], {}).get("zdr") is True
+    return (BY_ID.get(model) or {}).get("zdr", True) is not False
+
+
 class Router(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "claude-router"
@@ -766,6 +833,7 @@ class Router(BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length") or 0)
         body = self.rfile.read(n) if n else b""
 
+        pol = policy_for(cwd_of(body))
         model = requested = ""
         if body:
             try:
@@ -779,12 +847,23 @@ class Router(BaseHTTPRequestHandler):
                 elif requested == ARROW_MODEL:
                     model = resolve_arrow(req)
                 elif requested.startswith(FAMILY_PREFIX):
-                    model = resolve_family(req, requested[len(FAMILY_PREFIX):])
+                    model = resolve_family(req, requested[len(FAMILY_PREFIX):],
+                                           pol.get("tier"))
                 if model != requested:
                     req["model"] = model
                     body = json.dumps(req).encode()
 
-        attempts = [model] + failover_chain(model)
+        # The data policy filters the whole chain, so failover cannot route around
+        # it. A hand-picked model that the folder forbids is refused rather than
+        # silently swapped -- a swap looks like the pick worked.
+        attempts = [m for m in [model] + failover_chain(model) if allowed(m, pol)]
+        if not attempts:
+            return self.fail(403,
+                "%s is set to data policy %r, which does not permit %s. "
+                "Pick a Claude model, or change the folder's policy: "
+                "switchboard.py policy <folder> --data any"
+                % (cwd_of(body) or "this folder", pol.get("data", "any"),
+                   model or "that model"))
         prepared, errors = [], []
         for cand in attempts:
             got = self.prepare(cand, body)
