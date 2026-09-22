@@ -133,4 +133,34 @@ got = r.resolve_family(REQ, MENU_FAM, "pro", {"data": "zdr"})
 assert r.BY_ID.get(got, {}).get("family") != MENU_FAM, "family row leaked: %s" % got
 assert r.allowed(got, {"data": "zdr"}), got
 
+
+# --- the effort dial --------------------------------------------------------
+# The dial is a picker row whose five stops are five different models. A typo in
+# arrow_models would silently fall through to the fallback and look deliberate,
+# so every stop must name a real catalog entry.
+import json as _json
+_cat = _json.load(open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")))
+assert r.ARROW_ORDER, "no effort levels configured"
+for lvl in r.ARROW_ORDER:
+    tgt = r.ARROW_MAP.get(lvl)
+    assert tgt, "effort level %r has no model" % lvl
+    assert tgt in r.BY_ID, "effort %s -> %r is not in the catalog" % (lvl, tgt)
+
+# Every stop must stay inside the folder policy, and in Vanguard all five
+# collapse onto Claude rather than refusing the turn.
+for pol in ({"data": "any"}, {"data": "zdr"}, {"data": "claude"}):
+    for lvl in r.ARROW_ORDER:
+        got = r.resolve_arrow({"output_config": {"effort": lvl}}, pol)
+        assert r.allowed(got, pol), "effort %s under %s -> %s" % (lvl, pol["data"], got)
+assert all(r.resolve_arrow({"output_config": {"effort": l}}, {"data": "claude"})
+           == r.FALLBACK for l in r.ARROW_ORDER), "claude-only must collapse to the fallback"
+
+# The row has to be in the lineup AND carry behavesAs, or Claude Code will not
+# offer it: it is an id this version does not know.
+dial = [row for row in _cat["picker_lineup"] if row["model"] == r.ARROW_MODEL]
+assert len(dial) == 1, "the effort dial is not in picker_lineup"
+assert dial[0].get("behavesAs"), "the dial needs behavesAs or it is never offered"
+assert len(_cat["picker_lineup"]) <= 10, \
+    "%d rows — over ten collapses behind '... +N models'" % len(_cat["picker_lineup"])
+
 print("ok — %d models, policy rail holds" % len(r.CANDIDATES))

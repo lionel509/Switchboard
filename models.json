@@ -126,6 +126,12 @@
       "description": "Fast workhorse for routine coding · plan quota"
     },
     {
+      "model": "~pick/openrouter",
+      "label": "Effort dial",
+      "description": "←/→ picks the model · GLM → DeepSeek → Gemini Pro → Kimi K3 → Auto",
+      "behavesAs": "claude-opus-4-8"
+    },
+    {
       "model": "~x-ai/grok-latest"
     },
     {
@@ -146,9 +152,6 @@
     },
     {
       "model": "kimi/k2.8"
-    },
-    {
-      "model": "deepseek/deepseek-v4-pro"
     }
   ],
   "_failover_note": "On 402/429/529 the router retries the next model here before answering. 401/403 is NOT included: a bad credential must never silently drain a different quota. A target containing '/' is METERED — failing over to one spends cash, so these are set deliberately, not by default.",
@@ -435,7 +438,7 @@
       "good_at": "long-running software engineering, agentic coding and knowledge work - pinned successor to the grok-latest alias, 500K context at $1.60/$4.80 per 1M. Pick over grok-latest when 4.7 itself is wanted"
     }
   ],
-  "_arrow_note": "The ←/→ row. Claude Code's effort slider reaches the wire as output_config.effort, and a row declared via ANTHROPIC_CUSTOM_MODEL_OPTION with SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort gets that slider even as a gateway id. So one picker row carries this shortlist and the arrows choose between them. Ordered weakest to strongest; an unmapped level falls to the strongest set.",
+  "_arrow_note": "The ←/→ row. Claude Code's effort slider reaches the wire as output_config.effort, and a row declared via ANTHROPIC_CUSTOM_MODEL_OPTION with SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort gets that slider even as a gateway id. So one picker row carries this shortlist and the arrows choose between them. Ordered weakest to strongest; an unmapped level falls to the strongest set. Published as a picker row with behavesAs rather than via ANTHROPIC_CUSTOM_MODEL_OPTION: replaceBuiltInOptions hides that env var's row outright (stated in the 2.1.278 binary), so with a lineup in place the env route cannot work. The modelPicker schema is {model, label?, description?, behavesAs?}.",
   "arrow_models": {
     "low": "~z-ai/glm-latest",
     "medium": "deepseek/deepseek-v4-pro",

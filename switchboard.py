@@ -266,7 +266,14 @@ def cmd_apply(args):
             # Claude Code falls back to "From gateway" here, which is noise.
             print("⚠ no description for %s — add a blurb to the catalog" % mid,
                   file=sys.stderr)
-        opts.append({"model": mid, "label": label, "description": desc})
+        opt = {"model": mid, "label": label, "description": desc}
+        # behavesAs maps a row Claude Code does not know onto one it does, for
+        # prompt profile, capability and effort defaults. Without it a gateway id
+        # gets no effort slider -- and an unknown model-catalog row is not
+        # offered at all. Carried through verbatim; the id sent is unchanged.
+        if row.get("behavesAs"):
+            opt["behavesAs"] = row["behavesAs"]
+        opts.append(opt)
     if not opts:
         print("picker_lineup is empty in models.json — nothing to write",
               file=sys.stderr)
@@ -301,8 +308,10 @@ def cmd_apply(args):
 
     print("wrote a %d-row lineup to %s (backup: %s)" % (len(opts), SETTINGS, backup))
     for i, o in enumerate(opts, 1):
-        print("  %2d. %-13s %-36s %s" % (i, o.get("label", ""), o["model"],
-                                         o.get("description", "")))
+        print("  %2d. %-13s %-36s %s%s" % (i, o.get("label", ""), o["model"],
+                                           o.get("description", ""),
+                                           "  [behaves as %s]" % o["behavesAs"]
+                                           if o.get("behavesAs") else ""))
     if len(opts) > 10:
         print("⚠ over 10 rows — the rest collapse behind '… +%d models'."
               % (len(opts) - 10))
