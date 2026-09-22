@@ -171,10 +171,12 @@ assert tiny["thinking"] == {"type": "disabled"}, tiny["thinking"]
 clamped = _sent("max", max_tokens=8000)
 assert clamped["thinking"]["budget_tokens"] <= 8000 - 1024, clamped
 
-# Every gateway row needs behavesAs or the slider never appears on it. The
-# catalog default supplies it at apply time, so assert the default exists.
-assert _CAT.get("picker_behaves_as"), \
-    "without picker_behaves_as no gateway row gets an effort slider"
+# The slider is on or off via picker_behaves_as, and which one must be explicit:
+# a missing key reads as "nobody decided" and the dial silently does not appear.
+# Currently OFF -- xhigh and max are no-ops on an OpenRouter model. The
+# translation above stays correct either way, so it is tested either way.
+assert "picker_behaves_as" in _CAT, \
+    "the effort slider toggle must be explicit in the catalog, on or off"
 assert len(_CAT["picker_lineup"]) <= 10, \
     "%d rows — over ten collapses behind '... +N models'" % len(_CAT["picker_lineup"])
 

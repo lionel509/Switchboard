@@ -451,6 +451,6 @@
     "xhigh": 24000,
     "max": 48000
   },
-  "_behaves_as_note": "Applied to every gateway row by picker --apply. behavesAs maps an id Claude Code does not know onto one it does, for prompt profile, capability and effort defaults - and the effort CAPABILITY is what makes the ←/→ slider appear on the row at all. claude-opus-4-8 carries all five stops (effort + xhigh_effort + max_effort) and a lean prompt profile, rather than Opus 5's own prompt bundle, which has no business shaping a request to GLM or DeepSeek. Changes neither the label nor the model id sent on the wire.",
-  "picker_behaves_as": "claude-opus-4-8"
+  "_behaves_as_note": "OFF as of 2026-09-22 (was claude-opus-4-8). Set it back to \"claude-opus-4-8\" and re-run `picker --apply` to restore the ←/→ slider on gateway rows. Turned off because on an OpenRouter model the dial only has three real stops: OpenRouter's reasoning.effort tops out at 'high' and the thinking budget is flat above ~6000, so xhigh and max both behave as high. A five-stop dial where two stops do nothing is worse than no dial. The router-side translation in sanitize() is kept and still tested - it is simply dormant, because with no behavesAs Claude Code sends no effort at all and every request falls back to the flat THINKING_BUDGET, exactly as before any of this. behavesAs maps an id Claude Code does not know onto one it does, for prompt profile, capability and effort defaults; the effort CAPABILITY is what makes the slider appear on the row at all.",
+  "picker_behaves_as": null
 }
