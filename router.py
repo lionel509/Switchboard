@@ -495,6 +495,30 @@ def resolve_arrow(req, pol=None):
     return FALLBACK
 
 
+def picker_id(mid, entries=()):
+    """The id Claude Code sees: bare, or carrying its own "[1m]" context variant.
+
+    Claude Code does not know these ids, so it assumes a window for them --
+    measured on 2.1.280 (2026-09-23): an unrecognized id gets
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS (256,000 here), not the window this catalog
+    records, so a 1M model compacts at 256k. "[1m]" is the binary's own lever
+    ("append [1m] to the model name for 1M"): it sets the window to 1,000,000,
+    and it is stripped before the wire -- measured: "~fam/mimo[1m]" arrives as
+    "~fam/mimo", "kimi/k3[1m]" as "kimi/k3". So the suffix lives only in what
+    the picker publishes and never in models.json ids or upstream_id.
+
+    A row takes its smallest member's window (flash must not inherit pro's),
+    and Auto stays bare on purpose: it pins to a delegate of unknown size,
+    haiku included, and a 1M window would let a 200k delegate be overpacked.
+    """
+    if mid == AUTO_MODEL:
+        return mid
+    windows = [m.get("context") or 0 for m in entries if m]
+    if windows and min(windows) >= 1_000_000:
+        return mid + "[1m]"
+    return mid
+
+
 def picker_rows():
     """What to publish to /model. Families collapse; the rest is opt-in.
 
@@ -517,7 +541,7 @@ def picker_rows():
                 seen.add(t)
                 order.append(t)
         tiers = "/".join(order)
-        rows.append({"id": FAMILY_PREFIX + fam,
+        rows.append({"id": picker_id(FAMILY_PREFIX + fam, members),
                      "display_name": "%s (%s)" % (label, tiers)})
     for mid in PICKER.get("models", []):
         m = BY_ID.get(mid)
@@ -526,7 +550,7 @@ def picker_rows():
         label = m.get("name") or mid
         if m.get("zdr", True) is False:
             label += " (no ZDR)"
-        rows.append({"id": mid, "display_name": label})
+        rows.append({"id": picker_id(mid, [m]), "display_name": label})
     return rows
 
 

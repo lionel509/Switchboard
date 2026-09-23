@@ -277,9 +277,9 @@
         2.0,
         6.0
       ],
-      "context": 2000000,
+      "context": 500000,
       "good_at": "current events, informal reasoning, code review with opinions.",
-      "blurb": "2M context, current events, blunt review"
+      "blurb": "500K context, current events, blunt review"
     },
     {
       "id": "~z-ai/glm-latest",
@@ -290,7 +290,7 @@
         1.17,
         3.96
       ],
-      "context": 200000,
+      "context": 1310720,
       "good_at": "agentic tool use and coding at mid price.",
       "blurb": "Agentic tool use and coding, mid price"
     },
@@ -374,6 +374,7 @@
         0,
         0
       ],
+      "context": 1048576,
       "good_at": "the same Kimi subscription quota as K3 but an older, lighter generation - routine coding, edits and tool use where K3 flagship reasoning is overkill. 1M context. Costs no cash; draws the Kimi pool, not Claude quota.",
       "upstream_id": "kimi-for-coding",
       "specialties": [
@@ -392,6 +393,7 @@
         0,
         0
       ],
+      "context": 262144,
       "good_at": "K3 at a 256K window, which Kimi documents as drawing LESS membership quota than full k3 for routine work. Prefer over kimi/k3 whenever the task fits 256K.",
       "upstream_id": "k3-256k",
       "blurb": "K3 at 256K — less Kimi quota"

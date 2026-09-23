@@ -16,6 +16,11 @@ re-run `sync` for a change to reach the picker.
 """
 import argparse, getpass, json, os, platform, re, shutil, subprocess, sys, time, urllib.error, urllib.parse, urllib.request, uuid
 
+# The publish rule lives in router.picker_id and is imported, not reimplemented:
+# the picker cache and the /model lineup must grow the same "[1m]" suffix or one
+# of them silently keeps assuming a 256k window.
+from router import picker_id
+
 HERE    = os.path.dirname(os.path.abspath(__file__))
 CATALOG = os.path.join(HERE, "models.json")
 KEYFILE = os.path.expanduser("~/.config/openrouter-key")
@@ -266,7 +271,12 @@ def cmd_apply(args):
             # Claude Code falls back to "From gateway" here, which is noise.
             print("⚠ no description for %s — add a blurb to the catalog" % mid,
                   file=sys.stderr)
-        opt = {"model": mid, "label": label, "description": desc}
+        # A family row's window is its smallest member's, so flash never
+        # inherits pro's. See router.picker_id.
+        entries = ([x for x in cat["models"] if x.get("family") == mid[5:]]
+                   if mid.startswith("~fam/") else [m] if m else [])
+        opt = {"model": picker_id(mid, entries),
+               "label": label, "description": desc}
         # behavesAs maps a row Claude Code does not know onto one it does, for
         # prompt profile, capability and effort defaults. Without it a gateway id
         # gets no effort slider -- and an unknown model-catalog row is not

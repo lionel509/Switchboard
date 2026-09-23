@@ -180,4 +180,15 @@ assert "picker_behaves_as" in _CAT, \
 assert len(_CAT["picker_lineup"]) <= 10, \
     "%d rows — over ten collapses behind '... +N models'" % len(_CAT["picker_lineup"])
 
+# The "[1m]" publish rule (router.picker_id): the window a row claims is its
+# smallest member's, so flash never inherits pro's, and a sub-1M model must
+# never claim 1M. Fails if the suffix logic or a catalog context regresses.
+_ids = {row["id"] for row in r.picker_rows()}
+assert "~fam/mimo[1m]" in _ids, _ids          # both members hold 1M
+assert "kimi/k3-256k" in _ids, _ids           # 262,144 — must not claim 1M
+assert "~auto/auto" in _ids, _ids             # pins to a delegate of unknown size
+assert r.picker_id("m", [{"context": 999_999}]) == "m"
+assert r.picker_id("m", [{"context": 1_000_000}, {"context": 500_000}]) == "m"
+assert r.picker_id("m", [{"context": 1_000_000}]) == "m[1m]"
+
 print("ok — %d models, policy rail holds" % len(r.CANDIDATES))
