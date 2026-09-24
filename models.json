@@ -166,7 +166,11 @@
       ],
       "context": 200000,
       "good_at": "quick well-formed answers and light tool use, with no cash cost. Costs subscription quota.",
-      "blurb": "Quick answers and light tool use"
+      "blurb": "Quick answers and light tool use",
+      "failover": [
+        "kimi/k2.8",
+        "~deepseek/deepseek-v4-flash-latest"
+      ]
     },
     {
       "id": "claude-sonnet-5",
@@ -182,6 +186,7 @@
       "good_at": "the reliable default for real coding and agentic tool use, with no cash cost. Costs subscription quota.",
       "blurb": "Fast workhorse for routine coding",
       "failover": [
+        "kimi/k2.8",
         "~deepseek/deepseek-v4-flash-latest"
       ]
     },
@@ -199,7 +204,9 @@
       "good_at": "hardest reasoning and large multi-file refactors, with no cash cost. Costs the most subscription quota.",
       "blurb": "Deep reasoning and big refactors",
       "failover": [
-        "claude-sonnet-5"
+        "claude-sonnet-5",
+        "kimi/k2.8",
+        "~deepseek/deepseek-v4-flash-latest"
       ]
     },
     {
@@ -216,7 +223,9 @@
       "good_at": "hardest reasoning and large multi-file refactors, with no cash cost. Costs the most subscription quota.",
       "blurb": "Deep reasoning and big refactors",
       "failover": [
-        "claude-sonnet-5"
+        "claude-sonnet-5",
+        "kimi/k2.8",
+        "~deepseek/deepseek-v4-flash-latest"
       ]
     },
     {
