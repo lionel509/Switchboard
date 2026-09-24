@@ -458,7 +458,7 @@
   "arrow_models": {
     "low": "~z-ai/glm-latest",
     "medium": "deepseek/deepseek-v4-pro",
-    "high": "kimi/k3-256k",
+    "high": "kimi/k2.8",
     "xhigh": "kimi/k3",
     "max": "openrouter/auto"
   },
