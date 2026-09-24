@@ -794,6 +794,12 @@ def sanitize_native(body, prov, wire_model):
 FAILOVER_STATUSES = frozenset((402, 429, 529))
 
 
+def metered(model):
+    """True unless the catalog bills this model to a plan. Unknown ids count as
+    metered -- the safe guess when the question is whether a retry costs cash."""
+    return (BY_ID.get(model) or {}).get("billing") != "subscription"
+
+
 def failover_chain(model):
     """Models to try after `model` runs out of capacity, best-first.
 
@@ -1090,7 +1096,7 @@ class Router(BaseHTTPRequestHandler):
         client yet -- the status line is known before the first byte goes out, so
         a 429 on the first choice can be abandoned silently. Once streaming
         starts there is no going back, which is why failover is status-based and
-        never mid-stream.
+        never mid-stream. A transport error only fails over to a plan-billed model.
         """
         t0 = time.time()
         resp = conn = None
@@ -1110,7 +1116,10 @@ class Router(BaseHTTPRequestHandler):
             except Exception as e:
                 rec.update(status=502, error=str(e), ms=int((time.time() - t0) * 1000))
                 log_request(rec)
-                if last:
+                # A dropped connection is not a capacity signal, so it may move on
+                # to a plan-billed route but never buy the same turn again per token.
+                # This branch used to continue unconditionally: $3.11 on 2026-09-16.
+                if last or metered(prepared[i + 1]["model"]):
                     return self.fail(502, "upstream %s: %s" % (att["host"], e))
                 continue
             if resp.status in FAILOVER_STATUSES and not last:

@@ -191,4 +191,22 @@ assert r.picker_id("m", [{"context": 999_999}]) == "m"
 assert r.picker_id("m", [{"context": 1_000_000}, {"context": 500_000}]) == "m"
 assert r.picker_id("m", [{"context": 1_000_000}]) == "m[1m]"
 
+# Quota exhaustion must never become a cash bill. Sonnet's fallback was Gemini Pro
+# and a Claude-quota outage turned it into $14 in a day (2026-09-24).
+assert r.metered("~google/gemini-pro-latest") and r.metered("no-such-model")
+assert not r.metered("claude-sonnet-5") and not r.metered("kimi/k3")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import switchboard as _sb
+for _m in _CAT["models"]:
+    if _m.get("family") == "claude":
+        for _f in _m.get("failover") or []:
+            assert not _sb.too_pricey(r.BY_ID[_f]), \
+                "%s falls over to %s at %s — over the cap" % (_m["id"], _f, _sb.cost(r.BY_ID[_f]))
+assert _sb.resolve_ids(_CAT, "~fam/mimo[1m]") == ["xiaomi/mimo-v2.6-flash", "xiaomi/mimo-v2.6-pro"]
+assert "claude-opus-5-5" in _sb.resolve_ids(_CAT, "opus"), "the id Opus actually sends"
+# A dropped connection may only move on to a plan-billed route (relay()).
+_src = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "router.py")).read()
+assert 'if last or metered(prepared[i + 1]["model"]):' in _src, \
+    "relay()'s transport-error branch must not fail over to a metered model"
+
 print("ok — %d models, policy rail holds" % len(r.CANDIDATES))

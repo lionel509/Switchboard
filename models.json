@@ -182,11 +182,28 @@
       "good_at": "the reliable default for real coding and agentic tool use, with no cash cost. Costs subscription quota.",
       "blurb": "Fast workhorse for routine coding",
       "failover": [
-        "~google/gemini-pro-latest"
+        "~deepseek/deepseek-v4-flash-latest"
       ]
     },
     {
       "id": "claude-opus-5",
+      "name": "Claude Opus",
+      "family": "claude",
+      "tier": "opus",
+      "billing": "subscription",
+      "price": [
+        0,
+        0
+      ],
+      "context": 1000000,
+      "good_at": "hardest reasoning and large multi-file refactors, with no cash cost. Costs the most subscription quota.",
+      "blurb": "Deep reasoning and big refactors",
+      "failover": [
+        "claude-sonnet-5"
+      ]
+    },
+    {
+      "id": "claude-opus-5-5",
       "name": "Claude Opus",
       "family": "claude",
       "tier": "opus",
@@ -441,7 +458,7 @@
   "arrow_models": {
     "low": "~z-ai/glm-latest",
     "medium": "deepseek/deepseek-v4-pro",
-    "high": "~google/gemini-pro-latest",
+    "high": "kimi/k3-256k",
     "xhigh": "kimi/k3",
     "max": "openrouter/auto"
   },

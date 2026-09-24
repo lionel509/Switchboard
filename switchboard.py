@@ -9,6 +9,8 @@
     switchboard                     # full-screen editor (no subcommand)
     switchboard.py login            # pick from a list, open the key page
     switchboard.py login --all      # is every provider actually signed in?
+    switchboard.py route            # primary model + fallback, picked from lists
+    switchboard.py route --primary sonnet --fallback ~deepseek/deepseek-v4-flash-latest
 
 `add` looks the id up on OpenRouter and fills in name, price and context itself,
 so the catalog cannot drift into models that do not exist. Restart the router and
@@ -71,19 +73,11 @@ def cmd_list(args):
     for fam in sorted(by_family):
         print(fam)
         for m in sorted(by_family[fam], key=lambda x: x.get("price", [0])[0]):
-            if m.get("billing") == "subscription":
-                # not $0 — a different currency, and now more than one plan can
-                # be the payer, so say which pool it draws down.
-                cost = "%s quota" % (m["id"].split("/")[0] if "/" in m["id"]
-                                     else "claude")
-            elif (m.get("price") or [0])[0] < 0:
-                cost = "varies (delegated)"
-            else:
-                p = m.get("price", ["?", "?"])
-                cost = "$%s/$%s per 1M" % (p[0], p[1])
+            # A subscription is not $0 — a different currency, and more than one
+            # plan can be the payer, so cost() names the pool it draws down.
             warn = "  ⚠ no ZDR" if m.get("zdr", True) is False else ""
             print("  %-9s %-34s %-18s %s%s"
-                  % (m.get("tier", "?"), m["id"], cost, m.get("name", ""), warn))
+                  % (m.get("tier", "?"), m["id"], cost(m), m.get("name", ""), warn))
             if m.get("specialties"):
                 print("  %-9s %s★ %s%s" % ("", " " * 34, ", ".join(m["specialties"]),
                                            "  (%s)" % m["source"] if m.get("source") else ""))
@@ -1091,6 +1085,190 @@ def cmd_policy(args):
     return 0
 
 
+# A metered fallback re-buys the whole prompt, uncached, every time the primary is
+# out of capacity. Above this input price it needs an explicit yes: Sonnet's used
+# to be Gemini Pro, and a quota outage turned that into $14 in a day (2026-09-24).
+FALLBACK_MAX_IN = 0.50      # USD per 1M input tokens
+
+
+def cost(m):
+    if m.get("billing") == "subscription":
+        return "%s quota" % (m["id"].split("/")[0] if "/" in m["id"] else "claude")
+    p = m.get("price") or []
+    if not p:
+        return "?"
+    return "varies" if p[0] < 0 else "$%g/$%g per 1M" % (p[0], p[1])
+
+
+def too_pricey(m):
+    if m.get("billing") == "subscription":
+        return False
+    p = (m.get("price") or [-1])[0]
+    return p < 0 or p > FALLBACK_MAX_IN
+
+
+def resolve_ids(cat, mid):
+    """Catalog ids a picker id stands for. The router keys failover on the model
+    it resolved to, so a family row's fallback has to live on every member."""
+    mid = mid.replace("[1m]", "")
+    if any(m["id"] == mid for m in cat["models"]):
+        return [mid]
+    if mid.startswith("~fam/"):
+        return [m["id"] for m in cat["models"] if m.get("family") == mid[5:]]
+    return [m["id"] for m in cat["models"]
+            if m.get("family") == "claude" and m.get("tier") == mid]
+
+
+def ask(prompt, rows, keep):
+    """A number from the list, a listed id, or Enter to keep `keep`."""
+    for _ in range(3):
+        try:
+            raw = input("%s [Enter keeps %s]: " % (prompt, keep)).strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\naborted", file=sys.stderr)
+            return None
+        if not raw:
+            return keep
+        if raw.isascii() and raw.isdigit() and 0 <= int(raw) < len(rows):
+            return rows[int(raw)]
+        if raw in rows:
+            return raw
+        print("not listed: %r" % raw, file=sys.stderr)
+    return None
+
+
+def cmd_route(args):
+    """Primary model (what new sessions start on) and its fallback chain."""
+    cat = load()
+    by_id = {m["id"]: m for m in cat["models"]}
+    with open(SETTINGS) as f:
+        s = json.load(f)
+    lineup = [o["model"] for o in (s.get("modelPicker") or {}).get("options", [])]
+    labels = {o["model"]: o.get("label", "") for o in
+              (s.get("modelPicker") or {}).get("options", [])}
+    primary = s.get("model", "")
+    interactive = not (args.primary or args.fallback or args.no_fallback)
+
+    if interactive:
+        print("Primary — what a new session starts on:")
+        for i, mid in enumerate(lineup, 1):
+            print("  %s%2d. %-22s %s" % ("*" if mid == primary else " ", i,
+                                         labels.get(mid, ""), mid))
+        pick = ask("primary", [primary] + lineup, primary)
+        if pick is None:
+            return 1
+        args.primary = pick if pick != primary else None
+        target = pick
+    else:
+        target = args.for_ or args.primary or primary
+
+    ids = resolve_ids(cat, target)
+    if not ids:
+        print("⚠ %s is not in the catalog, so the router cannot fail it over — "
+              "add it first (Opus now sends claude-opus-5-5, for one)." % target,
+              file=sys.stderr)
+    current = (by_id[ids[0]].get("failover") or []) if ids else []
+
+    if interactive and ids:
+        cands = sorted((m for m in cat["models"] if m["id"] not in ids),
+                       key=lambda m: (m.get("billing") != "subscription",
+                                      (m.get("price") or [9e9])[0]))
+        print("\nFallback when %s is out of capacity (429/402/529), cheapest first:"
+              % target)
+        print("   0. none — fail instead of spending")
+        for i, m in enumerate(cands, 1):
+            print("  %s%2d. %-36s %-20s%s" % ("*" if m["id"] in current else " ", i,
+                  m["id"], cost(m), "  ⚠ over $%g/1M in" % FALLBACK_MAX_IN
+                  if too_pricey(m) else ""))
+        pick = ask("fallback", ["none"] + [m["id"] for m in cands],
+                   ",".join(current) or "none")
+        if pick is None:
+            return 1
+        if pick != (",".join(current) or "none"):
+            args.fallback, args.no_fallback = ([], True) if pick == "none" else ([pick], False)
+
+    if args.fallback:
+        for fb in args.fallback:
+            if fb not in by_id:
+                print("not in the catalog: %s" % fb, file=sys.stderr)
+                return 1
+            if too_pricey(by_id[fb]) and not args.allow_expensive:
+                if not interactive:
+                    print("%s costs %s — over the $%g/1M fallback cap. Pass "
+                          "--allow-expensive if you mean it." % (fb, cost(by_id[fb]),
+                          FALLBACK_MAX_IN), file=sys.stderr)
+                    return 1
+                if input("%s costs %s and re-buys the whole prompt on every miss. "
+                         "Type yes: " % (fb, cost(by_id[fb]))).strip() != "yes":
+                    return 1
+    changed = False
+    if (args.fallback or args.no_fallback) and ids:
+        for mid in ids:
+            if args.no_fallback:
+                by_id[mid]["failover"] = []
+            else:
+                by_id[mid]["failover"] = args.fallback
+        save(cat)
+        changed = True
+    if args.primary:
+        if args.primary not in lineup and not resolve_ids(cat, args.primary):
+            print("not in the /model menu or the catalog: %s" % args.primary,
+                  file=sys.stderr)
+            return 1
+        shutil.copy(SETTINGS, SETTINGS + ".bak")
+        s["model"] = args.primary
+        with open(SETTINGS, "w") as f:
+            json.dump(s, f, indent=2)
+            f.write("\n")
+        print("primary -> %s (new sessions; this one keeps its model)" % args.primary)
+
+    print("\nprimary  %s" % s.get("model", "?"))
+    for m in cat["models"]:
+        if m.get("failover"):
+            print("  %-36s -> %s" % (m["id"], ", ".join(
+                "%s (%s)" % (f, cost(by_id[f]) if f in by_id else "?")
+                for f in m["failover"])))
+    if not changed:
+        return 0
+    # The router reads models.json once, at startup.
+    if args.restart or (interactive and input(
+            "\nrestart the router now to apply? [Y/n] ").strip().lower() in ("", "y", "yes")):
+        return restart_router()
+    print("\nfallback saved — run `switchboard restart` to apply")
+    return 0
+
+
+def restart_router():
+    """Swap the running router for a fresh one, which rereads models.json. A
+    request in flight at that instant fails; the next one reaches the new router."""
+    port = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
+    pids = subprocess.run(["lsof", "-tiTCP:%d" % port, "-sTCP:LISTEN"],
+                          capture_output=True, text=True).stdout.split()
+    for p in pids:
+        os.kill(int(p), 15)
+    for _ in range(40):
+        if subprocess.run(["nc", "-z", "127.0.0.1", str(port)],
+                          capture_output=True).returncode:
+            break
+        time.sleep(0.1)
+    with open(os.path.join(HERE, "router.log"), "a") as log:
+        subprocess.Popen([sys.executable, os.path.join(HERE, "router.py")],
+                         stdout=subprocess.DEVNULL, stderr=log,
+                         start_new_session=True)
+    for _ in range(40):
+        if not subprocess.run(["nc", "-z", "127.0.0.1", str(port)],
+                              capture_output=True).returncode:
+            print("router restarted on :%d" % port)
+            return 0
+        time.sleep(0.1)
+    print("⚠ router did not come back on :%d — see router.log" % port, file=sys.stderr)
+    return 1
+
+
+def cmd_restart(args):
+    return restart_router()
+
+
 def cmd_sync(args):
     sync = os.path.join(HERE, "sync-models.py")
     return os.spawnv(os.P_WAIT, sys.executable, [sys.executable, sync])
@@ -1182,6 +1360,26 @@ def main():
     ap2.add_argument("--revert", action="store_true",
                      help="remove the lineup and restore the built-in menu")
     ap2.set_defaults(fn=cmd_apply)
+
+    rt = sub.add_parser("route", help="set the primary model, its fallback, or both "
+                                      "(no flags: pick from lists)")
+    rt.add_argument("--primary", metavar="ID",
+                    help="what new sessions start on, as it appears in /model")
+    rt.add_argument("--fallback", action="append", metavar="ID",
+                    help="model to try when the primary is out of capacity. "
+                         "Repeat for a chain")
+    rt.add_argument("--no-fallback", action="store_true",
+                    help="fail instead of falling over to anything")
+    rt.add_argument("--for", dest="for_", metavar="ID",
+                    help="whose fallback to set (default: the primary)")
+    rt.add_argument("--allow-expensive", action="store_true",
+                    help="permit a metered fallback over $%g/1M input" % FALLBACK_MAX_IN)
+    rt.add_argument("--restart", action="store_true",
+                    help="restart the router so a fallback change applies now")
+    rt.set_defaults(fn=cmd_route)
+
+    sub.add_parser("restart", help="restart the router so it rereads models.json"
+                   ).set_defaults(fn=cmd_restart)
 
     sub.add_parser("sync", help="publish the catalog to the picker cache"
                    ).set_defaults(fn=cmd_sync)
