@@ -13,7 +13,7 @@ Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
 and is stripped on both third-party paths — it never leaves this machine toward
 OpenRouter or a vendor endpoint.
 """
-import base64, hashlib, http.client, json, os, re, sys, threading, time
+import base64, hashlib, http.client, json, os, re, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -30,6 +30,17 @@ SURFACE  = [s for s in os.environ.get("CLAUDE_ROUTER_MODELS", "grok").split(",")
 # models.json is the source of truth for what appears in /model and what Auto
 # may choose from. Edit it with switchboard.py. If it is missing we fall back to
 # the old CLAUDE_ROUTER_MODELS substring behaviour so nothing breaks.
+# Gemma 4 Kaggle harness (swegemma) pass-through. The harness speaks OpenAI
+# /v1/chat/completions and always sends the competition model name, so the route
+# is picked by URL path, not model: point MODEL_PROXY_URL at one of
+#   http://127.0.0.1:8787/gemma/local/v1  -> llama-server (Gaming PC, via tunnel)
+#   http://127.0.0.1:8787/gemma/or/v1     -> OpenRouter, strict ZDR key,
+#                                            google/gemma-4-31b-it, $0.09/$0.34 per 1M
+# Competition Data may not leave his hardware (rules 2.4.b), so /local never fails
+# over to anything: if llama-server is down the request errors.
+GEMMA_LOCAL = os.environ.get("CLAUDE_ROUTER_GEMMA_LOCAL", "http://127.0.0.1:8000")
+GEMMA_OR_MODEL = "google/gemma-4-31b-it"
+
 CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")
 
 
@@ -906,6 +917,8 @@ class Router(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        if self.path.startswith("/gemma/"):
+            return self.gemma()
         self.route()
 
     def do_GET(self):
@@ -1239,6 +1252,72 @@ class Router(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
+
+    def gemma(self):
+        """Relay one harness request to /local or /or, verbatim apart from auth
+        and, for /or, the model name. No policy, no failover: the path decides."""
+        n = int(self.headers.get("content-length") or 0)
+        body = self.rfile.read(n) if n else b""
+        route, _, rest = self.path[len("/gemma/"):].partition("/")
+        rest = "/" + rest
+        headers = {"Content-Type": "application/json"}
+        if route == "local":
+            u = urllib.parse.urlsplit(GEMMA_LOCAL)
+            host, tls, path = u.netloc, u.scheme == "https", rest
+            if self.headers.get("authorization"):
+                headers["Authorization"] = self.headers["authorization"]
+        elif route == "or":
+            key = read_key(KEYFILE)
+            if not key:
+                return self.fail(500, "no OpenRouter key at ~/.config/openrouter-key")
+            try:
+                req = json.loads(body)
+            except Exception:
+                return self.fail(400, "body is not JSON")
+            req["model"] = GEMMA_OR_MODEL
+            req["provider"] = {"zdr": True}
+            body = json.dumps(req).encode()
+            host, tls = "openrouter.ai", True
+            path = "/api" + rest
+            headers["Authorization"] = "Bearer " + key
+        else:
+            return self.fail(404, "gemma route must be /gemma/local/... or /gemma/or/...")
+
+        t0 = time.time()
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": "gemma-" + route,
+               "model_requested": "gemma-4-31b-it-qat-w4a16-ct"}
+        try:
+            conn = (http.client.HTTPSConnection if tls else http.client.HTTPConnection)(
+                host, timeout=900)
+            conn.request("POST", path, body=body, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read()
+        except OSError as e:
+            rec.update(status=502, error=str(e)[:200])
+            log_request(rec)
+            return self.fail(502, "gemma %s upstream unreachable: %s" % (route, e))
+        rec.update(status=resp.status, ms=int((time.time() - t0) * 1000))
+        # Plain JSON, or SSE whose last usage-bearing chunk carries the totals.
+        u = None
+        for chunk in [data] + [l[5:] for l in reversed(data.splitlines())
+                               if l.startswith(b"data:")]:
+            try:
+                u = json.loads(chunk).get("usage")
+            except (ValueError, AttributeError):
+                continue
+            if u:
+                break
+        if u:
+            rec.update(model_used=GEMMA_OR_MODEL if route == "or" else "llama-server",
+                       **{"in": u.get("prompt_tokens"), "out": u.get("completion_tokens")})
+            if u.get("cost") is not None:
+                rec["cost"] = u["cost"]
+        log_request(rec)
+        self.send_response(resp.status)
+        self.send_header("Content-Type", resp.getheader("Content-Type", "application/json"))
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
 
     def fail(self, code, msg):
         payload = json.dumps({"type": "error",
