@@ -49,6 +49,29 @@ def or_models():
     return {m["id"]: m for m in json.load(urllib.request.urlopen(req, timeout=60))["data"]}
 
 
+def browse_rows(models, query, have):
+    """OpenRouter's /api/v1/models rows filtered for the editor's browser: every
+    query term must hit the id or name, cheapest input first, variable price
+    (negative, e.g. openrouter/auto) last. Prices come back per 1M tokens.
+    Written by the Gemma 4 intern against test_browse.py."""
+    terms = query.lower().split()
+    rows = []
+    for m in models:
+        hay = (m["id"] + " " + m.get("name", "")).lower()
+        if not all(t in hay for t in terms):
+            continue
+        p = m.get("pricing") or {}
+        try:
+            price = [float(p.get("prompt", -1)) * 1e6, float(p.get("completion", -1)) * 1e6]
+        except (TypeError, ValueError):
+            price = None
+        if price and min(price) < 0:
+            price = None
+        rows.append({"id": m["id"], "name": m.get("name", ""), "price": price,
+                     "context": m.get("context_length"), "added": m["id"] in have})
+    return sorted(rows, key=lambda r: (r["price"] is None, (r["price"] or [0])[0], r["id"]))
+
+
 def guess(mid):
     """family and tier from the id — 'google/gemini-pro-latest' -> gemini, pro."""
     slug = mid.split("/")[-1].lower()
