@@ -18,7 +18,6 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 FIELDS = [
-    ("failover",    "Fallback",     "list"),
     ("name",        "Picker name",  "text"),
     ("blurb",       "Blurb",        "text"),
     ("tier",        "Tier",         "text"),
@@ -343,6 +342,81 @@ def cycle_policy(cat, key, field):
     order = POLICY_DATA if field == "data" else POLICY_TIER
     cur = row.get(field) or (pol.get("_default") or {}).get(field) or order[0]
     row[field] = order[(order.index(cur) + 1) % len(order)] if cur in order else order[0]
+
+
+# ---- per-model settings (#19) ----------------------------------------------
+
+THINKING_DEFAULT = int(os.environ.get("CLAUDE_ROUTER_THINKING", "12000"))   # router.THINKING_BUDGET
+
+
+def tier_cap(cat, m):
+    price = (m.get("price") or [-1])[0]
+    for ceiling, cap in (cat.get("turn_caps") or {}).get("per_hour") or []:
+        if ceiling is None or 0 <= price < ceiling:
+            return cap
+    return None
+
+
+def parse_setting(typed):
+    """Blank -> None (use the default), else a whole number >= 0."""
+    t = (typed or "").strip()
+    if not t:
+        return None
+    if not t.isdigit():
+        raise ValueError("a whole number, 0, or blank for the default")
+    return int(t)
+
+
+def fallback_text(cat, m):
+    """The chain, plus a flag on any link that breaks the money rule. Existing
+    exceptions are shown, not blocked: kimi/k3 -> moonshotai/kimi-k3 is deliberate."""
+    ids = m.get("failover") or []
+    if not ids:
+        return "none -- fail instead"
+    probs = fallback_problems(cat, ids)
+    return ", ".join(ids) + ("   \u26a0 %d over the $%.2f/1M rule" % (len(probs), FALLBACK_MAX_IN) if probs else "")
+
+
+def settings_rows(cat, m, primary=""):
+    """The settings screen as rows: ("head", title) or
+    ("field", key, label, kind, shown_value). Rows that cannot apply to this
+    model are left out -- a plan model has no key, cap or reasoning budget."""
+    metered = m.get("billing") != "subscription"
+    via_or = routes_openrouter(m)
+    rows = [("head", "IDENTITY"),
+            ("field", "name", "Picker name", "text", m.get("name") or "\u2014"),
+            ("field", "blurb", "Blurb", "text", m.get("blurb") or "\u2014"),
+            ("field", "tier", "Tier", "tier", m.get("tier") or "\u2014"),
+            ("head", "MENU"),
+            ("field", "menu", "On /model", "toggle", "yes" if in_menu(cat, m["id"]) else "no"),
+            ("field", "primary", "Start here", "primary",
+             "yes \u2605 new sessions start on it" if m["id"] == primary else "no"),
+            ("head", "ROUTING")]
+    if via_or:
+        rows += [("field", "upstream", "Key", "key", key_of(m) + ("" if m.get("upstream") else "  (default)")),
+                 ("field", "zdr", "ZDR only", "zdr",
+                  "yes -- allowed in zdr folders (State Street)" if m.get("zdr", True) is not False
+                  else "no -- zdr folders (State Street) refuse it")]
+    rows += [("field", "auto", "Auto may pick", "toggle",
+              "no -- only when picked by hand" if m.get("auto") is False else "yes"),
+             ("field", "failover", "Fallback", "list", fallback_text(cat, m))]
+    rows.append(("head", "LIMITS"))
+    if metered and via_or:
+        cap = m.get("turn_cap")
+        rows.append(("field", "turn_cap", "Hourly cap", "number",
+                     "%s/h (price-tier default)" % tier_cap(cat, m) if cap is None
+                     else "none -- only for a model on its own capped key" if cap == 0 else "%d/h" % cap))
+        tb = m.get("thinking_budget")
+        rows.append(("field", "thinking_budget", "Reasoning", "number",
+                     "{:,} tokens (default)".format(THINKING_DEFAULT) if tb is None
+                     else "off" if tb == 0 else "{:,} tokens".format(tb)))
+    rows += [("field", "context", "Context", "readonly", "{:,}".format(m.get("context") or 0)),
+             ("field", "price", "Price /1M", "readonly", price_of(m) + ("   p refreshes from OpenRouter" if via_or else "")),
+             ("head", "NOTES"),
+             ("field", "good_at", "Good at", "text", m.get("good_at") or "\u2014"),
+             ("field", "specialties", "Specialties", "list", ", ".join(m.get("specialties") or []) or "\u2014"),
+             ("field", "source", "Evidence", "text", m.get("source") or "\u2014")]
+    return rows
 
 
 def row_text(kind, payload, cat, picks, keyed=False):
@@ -783,74 +857,185 @@ class UI(object):
         self.dirty = True
 
     def edit_model(self, m):
-        fsel = 0
-        fields = FIELDS + ([("upstream", "Key", "key")] if routes_openrouter(m) else [])
+        """Every setting one model has, grouped, on one screen (#19)."""
+        fsel, top, note = 0, 0, ""
+        tiers = sorted({x.get("tier") for x in self.cat.get("models", []) if x.get("tier")})
         while True:
-            self.scr.erase()
+            rows = settings_rows(self.cat, m, self.new_primary or self.primary)
+            fields = [i for i, r in enumerate(rows) if r[0] == "field"]
+            fsel = max(0, min(fsel, len(fields) - 1))
+            self.scr.clear()
             h, w = self.scr.getmaxyx()
             self.put(0, 2, m["id"], attr("title"))
-            self.put(1, 2, "─" * max(0, w - 5), attr("rule"))
-            y = 3
-            for i, (key, label, kind) in enumerate(fields):
-                val = m.get(key)
-                if kind == "key":
-                    val = key_of(m) + ("" if m.get("upstream") else "  (default)")
-                elif kind == "list":
-                    val = ", ".join(val or [])
-                val = "" if val is None else str(val)
-                if i == fsel:
-                    self.put(y, 1, "▌", attr("sel"))
-                self.put(y, 3, pad(label, 14), attr("sel" if i == fsel else "tier"))
-                self.put(y, 17, short(val, max(10, w - 22)) or "—",
-                         attr("name" if val else "off"))
-                y += 1
-            y += 1
-            for label, val in (("id", m["id"]),
-                               ("context", "{:,}".format(m.get("context", 0))),
-                               ("price", price_of(m)),
-                               ("vendor id", m.get("upstream_id") or "(same as id)")):
-                self.put(y, 3, pad(label, 14), attr("note"))
-                self.put(y, 17, str(val), attr("note"))
-                y += 1
-            self.footer(h - 1, w, [("↑↓", "field"), ("enter", "edit / next key"),
-                                   ("esc", "back")])
+            self.put(0, len(m["id"]) + 4, "%s \u00b7 %s" % (m.get("name", ""), price_of(m)), attr("note"))
+            self.put(1, 2, "\u2500" * max(0, w - 5), attr("rule"))
+            body = h - 5
+            cur = fields[fsel]
+            top = min(max(top, cur - body + 1), cur)
+            for y, i in enumerate(range(top, min(len(rows), top + body)), start=2):
+                r = rows[i]
+                if r[0] == "head":
+                    self.put(y, 3, r[1], attr("head"))
+                    continue
+                _, key, label, kind, val = r
+                on = i == cur
+                if on:
+                    self.put(y, 1, "\u258c", attr("sel"))
+                self.put(y, 5, pad(label, 15), attr("sel" if on else "tier"))
+                role = "off" if kind == "readonly" else (
+                    "bad" if val.startswith(("no --", "none --", "off")) or "\u26a0" in val else "name")
+                self.put(y, 21, short(val, max(10, w - 25)), attr("sel" if on else role))
+            if note:
+                self.put(h - 3, 3, short(note, w - 6), attr("bad" if note.startswith("\u26a0") else "note"))
+            self.footer(h - 1, w, [("\u2191\u2193", "setting"), ("enter", "change"), ("t", "test it"),
+                                   ("p", "refresh price"), ("d", "delete"), ("esc", "back")])
             self.scr.refresh()
             c = self.scr.getch()
+            note = ""
             if c in (27, ord("q")):
                 return
             if c in (curses.KEY_UP, ord("k")):
                 fsel = max(0, fsel - 1)
-            elif c in (curses.KEY_DOWN, ord("j")):
+                continue
+            if c in (curses.KEY_DOWN, ord("j")):
                 fsel = min(len(fields) - 1, fsel + 1)
-            elif c in (10, 13, curses.KEY_ENTER):
-                key, label, kind = fields[fsel]
-                if kind == "key":
-                    cycle_key(self.cat, m)
-                    self.dirty = True
+                continue
+            if c == ord("t"):
+                note = self.test_model(m)
+                continue
+            if c == ord("p"):
+                note = self.refresh_price(m)
+                continue
+            if c == ord("d"):
+                self.delete_model(m)
+                return
+            if c not in (10, 13, curses.KEY_ENTER):
+                continue
+            _, key, label, kind, val = rows[cur]
+            if kind == "readonly":
+                note = "%s comes from OpenRouter; p refreshes the price" % label
+            elif kind == "tier":
+                m["tier"] = tiers[(tiers.index(m.get("tier")) + 1) % len(tiers)] if m.get("tier") in tiers else tiers[0]
+                self.dirty = True
+            elif kind == "toggle" and key == "menu":
+                menu_toggle(self.cat, m["id"])
+                self.dirty = True
+            elif kind == "toggle" and key == "auto":
+                if m.get("auto") is False:
+                    m.pop("auto")
+                else:
+                    m["auto"] = False
+                self.dirty = True
+            elif kind == "primary":
+                if not in_menu(self.cat, m["id"]):
+                    menu_toggle(self.cat, m["id"])
+                self.new_primary = m["id"]
+                self.dirty = True
+                note = "new sessions start on %s once saved (it's on the menu too)" % m["id"]
+            elif kind == "key":
+                cycle_key(self.cat, m)
+                self.dirty = True
+            elif kind == "zdr":
+                if m.get("zdr", True) is False:
+                    # Allowing a model into zdr folders widens where their data can go.
+                    if not self.confirm("allow %s in zdr folders (State Street)? only if its "
+                                        "provider really doesn't retain" % m["id"]):
+                        continue
+                    m.pop("zdr")
+                else:
+                    m["zdr"] = False
+                self.dirty = True
+            elif kind == "number":
+                typed = self.prompt("%s (blank = default, 0 = %s):" % (label, "no cap" if key == "turn_cap" else "off"),
+                                    "" if m.get(key) is None else str(m[key]))
+                if typed is None:
                     continue
-                cur = m.get(key)
-                cur = ", ".join(cur or []) if kind == "list" else ("" if cur is None
-                                                                  else str(cur))
-                new = self.prompt(label + ":", cur)
+                try:
+                    v = parse_setting(typed)
+                except ValueError as e:
+                    note = "\u26a0 not set: %s" % e
+                    continue
+                if key == "turn_cap" and v == 0 and not self.confirm(
+                        "no hourly cap on %s? a looping agent could then spend until its key's limit" % m["id"]):
+                    continue
+                if v is None:
+                    m.pop(key, None)
+                else:
+                    m[key] = v
+                self.dirty = True
+            else:                                  # text or list
+                cur_v = m.get(key)
+                cur_v = ", ".join(cur_v or []) if kind == "list" else ("" if cur_v is None else str(cur_v))
+                new = self.prompt(label + ":", cur_v)
                 if new is None:
                     continue
                 if kind == "list":
                     vals = [x.strip() for x in new.split(",") if x.strip()]
                     probs = fallback_problems(self.cat, vals) if key == "failover" else []
                     if probs:
-                        self.put(h - 3, 3, short("\u26a0 not set: " + probs[0], w - 6), attr("bad"))
-                        self.scr.getch()
+                        note = "\u26a0 not set: " + probs[0]
                         continue
                     if vals:
                         m[key] = vals
                     else:
                         m.pop(key, None)
+                elif new.strip():
+                    m[key] = new.strip()
                 else:
-                    if new.strip():
-                        m[key] = new.strip()
-                    else:
-                        m.pop(key, None)
+                    m.pop(key, None)
                 self.dirty = True
+
+    def test_model(self, m):
+        """One real request through the running router: reply, latency, cost."""
+        import time, urllib.request
+        self.put(self.scr.getmaxyx()[0] - 3, 3, "testing %s \u2026" % m["id"], attr("note"))
+        self.scr.refresh()
+        body = json.dumps({"model": m["id"], "max_tokens": 2000,
+                           "messages": [{"role": "user", "content": "Reply with exactly: pong"}]}).encode()
+        req = urllib.request.Request("http://127.0.0.1:8787/v1/messages", data=body, headers={
+            "content-type": "application/json", "anthropic-version": "2023-06-01"})
+        t0 = time.time()
+        try:
+            d = json.load(urllib.request.urlopen(req, timeout=120))
+        except urllib.error.HTTPError as e:
+            try:
+                why = json.load(e).get("error", {}).get("message", "")
+            except Exception:
+                why = ""
+            return "\u26a0 HTTP %s: %s" % (e.code, why[:160])
+        except Exception as e:
+            return "\u26a0 router unreachable: %s" % e
+        ms = int((time.time() - t0) * 1000)
+        text = " ".join(b.get("text", "") for b in d.get("content", []) if b.get("type") == "text").strip()
+        cost = ""
+        try:
+            with open(os.path.join(HERE, "requests.log")) as f:
+                last = [json.loads(l) for l in f.readlines()[-20:]]
+            hit = [r for r in last if r.get("model_requested") == m["id"]]
+            if hit and hit[-1].get("cost") is not None:
+                cost = " \u00b7 $%.6f" % hit[-1]["cost"]
+        except (OSError, ValueError):
+            pass
+        return "reply %r \u00b7 %d ms%s" % (text[:40] or "(empty)", ms, cost)
+
+    def refresh_price(self, m):
+        if not routes_openrouter(m):
+            return "%s is plan-billed; nothing to look up" % m["id"]
+        try:
+            row = self.sb.or_models().get(m["id"])
+        except Exception as e:
+            return "\u26a0 couldn't reach OpenRouter: %s" % e
+        if not row:
+            return "\u26a0 %s isn't in OpenRouter's list any more" % m["id"]
+        pr = row.get("pricing") or {}
+        try:
+            new = [round(float(pr["prompt"]) * 1e6, 4), round(float(pr["completion"]) * 1e6, 4)]
+        except (KeyError, TypeError, ValueError):
+            return "\u26a0 OpenRouter gave no usable price"
+        old = m.get("price")
+        m["price"], m["context"] = new, row.get("context_length") or m.get("context")
+        self.dirty = self.dirty or new != old
+        return "price %s \u2192 %s" % (old, new) if new != old else "price unchanged: %s" % new
 
     def add_model(self):
         """Pick from OpenRouter's whole list; type an id only if it can't be fetched."""
