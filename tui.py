@@ -136,13 +136,13 @@ def row_segs(kind, payload, cat, picks, keyed=False):
             state, role = "●  signed in", "ok"
         else:
             state, role = "○  no key", "bad"
-        return [(pad(u.get("label") or u["name"], 11), "id"), (pad(host, 30), "price"),
+        return [(pad(u.get("label") or u["name"], 21), "id"), (pad(host, 22), "price"),
                 (pad(state, 16), role)]
     if kind == "prov":
         p = cat["providers"][payload]
         host = p.get("host", "?") + (p.get("path_prefix") or "")
         state = "●  signed in" if keyed else "○  no key"
-        return [(pad(payload, 11), "id"), (pad(host, 30), "price"),
+        return [(pad(payload, 21), "id"), (pad(host, 22), "price"),
                 (pad(state, 16), "ok" if keyed else "bad"),
                 ("oauth" if p.get("oauth") else "", "note")]
     m = payload
@@ -153,9 +153,57 @@ def row_segs(kind, payload, cat, picks, keyed=False):
         box, box_role = "●  ", "on"
     else:
         box, box_role = "○  ", "off"
-    return [(box, box_role), (pad(short(mid, 34), 35), "id"),
+    segs = [(box, box_role), (pad(short(mid, 34), 35), "id"),
             (pad(m.get("tier", "?"), 7), "tier"),
             (pad(price_of(m), 15), "price"), (m.get("name", ""), "name")]
+    if m.get("upstream"):
+        segs.append(("  key: " + m["upstream"], "star"))
+    return segs
+
+
+def key_of(m):
+    """Which upstream key the router sends this model with (router.or_key)."""
+    return m.get("upstream") or ("openrouter-nonzdr" if m.get("zdr", True) is False
+                                 else "openrouter")
+
+
+def key_choices(cat):
+    """Upstream rows a model can pick: OpenRouter keys, in catalog order."""
+    return [u["name"] for u in cat.get("upstreams", [])
+            if u.get("host") == "openrouter.ai" and u.get("key_file")]
+
+
+def routes_openrouter(m):
+    """Cash models reached through OpenRouter -- the only ones a key choice means anything for."""
+    return m.get("billing") != "subscription" and "/" in m["id"]
+
+
+def cycle_key(cat, m):
+    """Step m to the next key. Landing on the default drops the field, so a model
+    that never chose a key keeps following its zdr flag."""
+    names = key_choices(cat) or ["openrouter"]
+    cur = key_of(m)
+    nxt = names[(names.index(cur) + 1) % len(names)] if cur in names else names[0]
+    m.pop("upstream", None)
+    if nxt != key_of(m):
+        m["upstream"] = nxt
+
+
+def new_upstream(cat, name, label="", key_file=""):
+    """An upstreams row for another OpenRouter key. 'gemma' -> openrouter-gemma."""
+    import re
+    if not re.match(r"^[a-z0-9][a-z0-9-]*$", name or ""):
+        raise ValueError("name: lowercase letters, digits and dashes")
+    if not name.startswith("openrouter"):
+        name = "openrouter-" + name
+    if any(u["name"] == name for u in cat.get("upstreams", [])):
+        raise ValueError("%s already exists" % name)
+    return {"name": name, "label": label or "OpenRouter (%s)" % name[len("openrouter-"):],
+            "host": "openrouter.ai", "key_file": key_file or "~/.config/" + name.replace(
+                "openrouter-", "openrouter-key-", 1),
+            "verify_url": "https://openrouter.ai/api/v1/key",
+            "console_url": "https://openrouter.ai/settings/keys",
+            "note": "metered; sent only for models that pick it"}
 
 
 def row_text(kind, payload, cat, picks, keyed=False):
@@ -370,7 +418,8 @@ class UI(object):
             pairs = [("name", m.get("name", "")), ("tier", m.get("tier", "?")),
                      ("price", price_of(m)),
                      ("context", "{:,}".format(m.get("context", 0))),
-                     ("upstream", m.get("upstream_id") or "same as id"),
+                     ("vendor id", m.get("upstream_id") or "same as id"),
+                     ("key", key_of(m) if routes_openrouter(m) else "\u2014 plan"),
                      ("in picker", "yes" if m["id"] in self.picker_set()
                       else ("n/a \u2014 native" if not publishable(m["id"]) else "no"))]
             for k, v in pairs:
@@ -516,15 +565,18 @@ class UI(object):
 
     def edit_model(self, m):
         fsel = 0
+        fields = FIELDS + ([("upstream", "Key", "key")] if routes_openrouter(m) else [])
         while True:
             self.scr.erase()
             h, w = self.scr.getmaxyx()
             self.put(0, 2, m["id"], attr("title"))
             self.put(1, 2, "─" * max(0, w - 5), attr("rule"))
             y = 3
-            for i, (key, label, kind) in enumerate(FIELDS):
+            for i, (key, label, kind) in enumerate(fields):
                 val = m.get(key)
-                if kind == "list":
+                if kind == "key":
+                    val = key_of(m) + ("" if m.get("upstream") else "  (default)")
+                elif kind == "list":
                     val = ", ".join(val or [])
                 val = "" if val is None else str(val)
                 if i == fsel:
@@ -537,11 +589,12 @@ class UI(object):
             for label, val in (("id", m["id"]),
                                ("context", "{:,}".format(m.get("context", 0))),
                                ("price", price_of(m)),
-                               ("upstream", m.get("upstream_id") or "(same as id)")):
+                               ("vendor id", m.get("upstream_id") or "(same as id)")):
                 self.put(y, 3, pad(label, 14), attr("note"))
                 self.put(y, 17, str(val), attr("note"))
                 y += 1
-            self.footer(h - 1, w, [("↑↓", "field"), ("enter", "edit"), ("esc", "back")])
+            self.footer(h - 1, w, [("↑↓", "field"), ("enter", "edit / next key"),
+                                   ("esc", "back")])
             self.scr.refresh()
             c = self.scr.getch()
             if c in (27, ord("q")):
@@ -549,9 +602,13 @@ class UI(object):
             if c in (curses.KEY_UP, ord("k")):
                 fsel = max(0, fsel - 1)
             elif c in (curses.KEY_DOWN, ord("j")):
-                fsel = min(len(FIELDS) - 1, fsel + 1)
+                fsel = min(len(fields) - 1, fsel + 1)
             elif c in (10, 13, curses.KEY_ENTER):
-                key, label, kind = FIELDS[fsel]
+                key, label, kind = fields[fsel]
+                if kind == "key":
+                    cycle_key(self.cat, m)
+                    self.dirty = True
+                    continue
                 cur = m.get(key)
                 cur = ", ".join(cur or []) if kind == "list" else ("" if cur is None
                                                                   else str(cur))
@@ -580,6 +637,29 @@ class UI(object):
         self.cat = self.sb.load()
         self.rebuild()
         self.status = "reloaded after add"
+
+    def add_upstream(self):
+        """A new OpenRouter key: an upstreams row, then the usual sign-in to fill it."""
+        name = self.prompt("key name (e.g. gemma -> openrouter-gemma):", "")
+        if not name or not name.strip():
+            return
+        try:
+            u = new_upstream(self.cat, name.strip())
+        except ValueError as e:
+            self.status = "not added: %s" % e
+            return
+        label = self.prompt("label:", u["label"])
+        kf = self.prompt("key file:", u["key_file"])
+        if label is None or kf is None:
+            self.status = "cancelled"
+            return
+        u["label"], u["key_file"] = label.strip() or u["label"], kf.strip() or u["key_file"]
+        self.cat.setdefault("upstreams", []).append(u)
+        self.dirty = True
+        self.rebuild()
+        self.sel = next(i for i, r in enumerate(self.rows) if r[0] == "up" and r[1] is u)
+        self.login_upstream(u)
+        self.status = "%s added -- not saved yet; pick it per model under Key" % u["name"]
 
     def delete_model(self, m):
         if not self.confirm("remove %s from the catalog?" % m["id"]):
@@ -726,7 +806,10 @@ class UI(object):
                 elif kind == "up":
                     self.login_upstream(payload)
             elif c == ord("a"):
-                self.add_model()
+                if kind in ("up", "prov"):
+                    self.add_upstream()
+                else:
+                    self.add_model()
             elif c == ord("d") and kind == "model":
                 self.delete_model(payload)
             elif c == ord("s"):
