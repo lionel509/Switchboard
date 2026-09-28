@@ -52,6 +52,28 @@ GEMMA_OR_MODEL = "google/gemma-4-31b-it"
 GEMMA_OR_PROVIDER = {"only": ["reka"], "allow_fallbacks": False, "zdr": True}
 
 
+# /gemma/kaggle: a fast, free stand-in for Gemma while iterating on the agent
+# config (#28). Gemini 3.1 Flash-Lite through Kaggle's Model Proxy, which a local
+# token can reach; Gemma 4 it cannot. The competition serves Gemma with a 32K
+# context, and Flash-Lite takes 1M, so the stand-in refuses what vLLM would --
+# otherwise a config could win here only by using histories Kaggle never allows.
+GEMMA_KAGGLE_MODEL = "google/gemini-3.1-flash-lite-preview"
+GEMMA_CONTEXT = 32768
+
+
+def gemma_kaggle_body(req):
+    """The harness request for the stand-in, or ValueError if it wouldn't fit Gemma."""
+    prompt = len(json.dumps(req.get("messages", [])) + json.dumps(req.get("tools", []))) // 4
+    need = prompt + (req.get("max_tokens") or 0)
+    if need > GEMMA_CONTEXT:
+        raise ValueError("This model's maximum context length is %d tokens. However, you requested "
+                         "~%d tokens (~%d in the messages, %d for the completion)."
+                         % (GEMMA_CONTEXT, need, prompt, req.get("max_tokens") or 0))
+    out = {k: v for k, v in req.items() if k != "temperature"}     # the proxy rejects it
+    out["model"] = GEMMA_KAGGLE_MODEL
+    return out
+
+
 def gemma_or_body(req):
     """The harness request as sent to OpenRouter: the real model name, and the
     CHEAPEST zero-retention provider. Providers of this one model ranged
@@ -1546,8 +1568,21 @@ class Router(BaseHTTPRequestHandler):
             host, tls = "openrouter.ai", True
             path = "/api" + rest
             headers["Authorization"] = "Bearer " + key
+        elif route == "kaggle":
+            prov = PROVIDERS.get("kaggle")
+            got = prov and minted_token("kaggle", prov)
+            if not got:
+                return self.fail(401, "no Kaggle Model Proxy token -- run: kaggle benchmarks auth")
+            try:
+                body = json.dumps(gemma_kaggle_body(json.loads(body))).encode()
+            except ValueError as e:
+                return self.fail(400, str(e))
+            u = urllib.parse.urlsplit(got[0])
+            host, tls = u.netloc, True
+            path = u.path.rstrip("/") + "/openapi" + (rest[3:] if rest.startswith("/v1/") else rest)
+            headers["Authorization"] = "Bearer " + got[1]
         else:
-            return self.fail(404, "gemma route must be /gemma/local/... or /gemma/or/...")
+            return self.fail(404, "gemma route must be /gemma/local/..., /gemma/or/... or /gemma/kaggle/...")
 
         t0 = time.time()
         rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": "gemma-" + route,
@@ -1574,7 +1609,7 @@ class Router(BaseHTTPRequestHandler):
             if u:
                 break
         if u:
-            rec.update(model_used=GEMMA_OR_MODEL if route == "or" else "llama-server",
+            rec.update(model_used={"or": GEMMA_OR_MODEL, "kaggle": GEMMA_KAGGLE_MODEL}.get(route, "llama-server"),
                        **{"in": u.get("prompt_tokens"), "out": u.get("completion_tokens")})
             if u.get("cost") is not None:
                 rec["cost"] = u["cost"]
