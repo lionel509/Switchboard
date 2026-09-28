@@ -45,12 +45,19 @@ GEMMA_LOCAL = os.environ.get("CLAUDE_ROUTER_GEMMA_LOCAL", "http://127.0.0.1:8000
 GEMMA_OR_MODEL = "google/gemma-4-31b-it"
 
 
+# Pinned to Reka ($0.08/$0.30 per 1M, the cheapest of 15 providers on 2026-09-28)
+# with no fallback, by Lionel's call: an outage fails the call instead of moving
+# to a pricier provider. zdr stays as a guard: if Reka stops qualifying, calls fail
+# rather than reaching a provider that retains.
+GEMMA_OR_PROVIDER = {"only": ["reka"], "allow_fallbacks": False, "zdr": True}
+
+
 def gemma_or_body(req):
     """The harness request as sent to OpenRouter: the real model name, and the
     CHEAPEST zero-retention provider. Providers of this one model ranged
     $0.08-$0.75/1M input on 2026-09-28, and left to OpenRouter 42% of calls
     landed above $0.09 -- a quarter of the day's spend for the same tokens."""
-    return dict(req, model=GEMMA_OR_MODEL, provider={"zdr": True, "sort": "price"})
+    return dict(req, model=GEMMA_OR_MODEL, provider=GEMMA_OR_PROVIDER)
 
 CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")
 
