@@ -164,7 +164,10 @@ def sanitize(body):
     # model ran at a flat THINKING_BUDGET regardless of where the dial sat,
     # which is what made ←/→ look broken on a gateway row.
     mt = req.get("max_tokens") or 0
-    want = EFFORT_BUDGETS.get(effort, THINKING_BUDGET) if effort else THINKING_BUDGET
+    # A model can set its own budget ("thinking_budget"); 0 turns thinking off
+    # for it, slider or not.
+    base = (BY_ID.get(model) or {}).get("thinking_budget", THINKING_BUDGET)
+    want = 0 if base == 0 else (EFFORT_BUDGETS.get(effort, base) if effort else base)
     budget = min(want, mt - 1024)
     if budget >= 1024:
         req["thinking"] = {"type": "enabled", "budget_tokens": budget}
@@ -429,6 +432,7 @@ def resolve_auto(req, pol=None):
         # A provider can opt out of Auto ("auto": false): Kaggle's credit is for a
         # hand-pick, never for a router model to spend on its own.
         cands = [m for m in CANDIDATES if allowed(m["id"], pol or {})
+                 and (BY_ID.get(m["id"]) or m).get("auto", True)
                  and (PROVIDERS.get(m["id"].split("/")[0]) or {}).get("auto", True)]
         chosen = ask_router_model(task_text(req), cands) or FALLBACK
     with _auto_lock:
@@ -1009,7 +1013,13 @@ def turn_cap(model):
         return caps.get("gemma_or_per_hour")
     if not metered(model):
         return None
-    price = ((BY_ID.get(model) or {}).get("price") or [-1])[0]
+    
+    model_info = BY_ID.get(model) or {}
+    if "turn_cap" in model_info:
+        cap = model_info["turn_cap"]
+        return cap if cap != 0 else None
+
+    price = (model_info.get("price") or [-1])[0]
     for ceiling, cap in caps.get("per_hour") or []:
         if ceiling is None or 0 <= price < ceiling:
             return cap
