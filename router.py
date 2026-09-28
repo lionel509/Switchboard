@@ -592,9 +592,22 @@ def or_key(model=None):
 
     Falls back to the strict key when no permissive one is installed, so the only
     cost of not having it is the guardrail refusal you would have had anyway.
+
+    A model naming an "upstream" is sent with that upstreams row's key_file and
+    nothing else: a missing row or file is None, never the main key, because a
+    per-model key usually exists to cap what that model can spend.
     """
-    if model and (BY_ID.get(model) or {}).get("zdr", True) is False:
-        return read_key(NONZDR_KEYFILE) or read_key(KEYFILE)
+    if model:
+        m = BY_ID.get(model) or {}
+        if "upstream" in m:
+            upstream_name = m["upstream"]
+            upstream = next((u for u in CATALOG.get("upstreams", []) if u.get("name") == upstream_name), None)
+            if upstream and "key_file" in upstream:
+                return read_key(upstream["key_file"])
+            return None
+
+        if m.get("zdr", True) is False:
+            return read_key(NONZDR_KEYFILE) or read_key(KEYFILE)
     return read_key(KEYFILE)
 
 
@@ -1057,7 +1070,9 @@ class Router(BaseHTTPRequestHandler):
         elif target == "openrouter":
             key = or_key(model)
             if not key:
-                return "no OpenRouter key at ~/.config/openrouter-key"
+                up = (BY_ID.get(model) or {}).get("upstream")
+                return ("no key for upstream %r -- check its key_file" % up if up
+                        else "no OpenRouter key at ~/.config/openrouter-key")
             host, path = "openrouter.ai", "/api" + self.path
             headers = self.headers_for_openrouter(key)
             body = sanitize(body)
@@ -1073,7 +1088,10 @@ class Router(BaseHTTPRequestHandler):
                 # Audit: a privacy rail is only trustworthy if you can ask later
                 # what actually went to the permissive workspace.
                 "nonzdr": target == "openrouter" and
-                          (BY_ID.get(model) or {}).get("zdr", True) is False}
+                          not (BY_ID.get(model) or {}).get("upstream") and
+                          (BY_ID.get(model) or {}).get("zdr", True) is False,
+                "key_upstream": target == "openrouter" and
+                                (BY_ID.get(model) or {}).get("upstream")}
 
     def headers_passthrough(self):
         """Everything the client sent, minus hop-by-hop. Credential untouched."""
@@ -1162,6 +1180,8 @@ class Router(BaseHTTPRequestHandler):
                    "upstream": att["upstream"], "model_requested": att["model"]}
             if att.get("nonzdr"):
                 rec["nonzdr"] = True
+            if att.get("key_upstream"):
+                rec["key"] = att["key_upstream"]
             if requested and requested != att["model"]:
                 rec["auto_from"] = requested
             if i:
