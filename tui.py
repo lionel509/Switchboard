@@ -18,6 +18,7 @@ import sys
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 FIELDS = [
+    ("failover",    "Fallback",     "list"),
     ("name",        "Picker name",  "text"),
     ("blurb",       "Blurb",        "text"),
     ("tier",        "Tier",         "text"),
@@ -115,6 +116,49 @@ def pad(s, n):
     s = str(s)
     return s if len(s) >= n else s + " " * (n - len(s))
 
+def spend_today(lines, date):
+    """Calculate daily spend from requests log lines."""
+    results = {}
+    for line in lines:
+        try:
+            rec = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        ts = rec.get('ts', '')
+        if not isinstance(ts, str) or not ts.startswith(date):
+            continue
+
+        group = rec.get('key') or rec.get('upstream')
+        if group is None:
+            continue
+
+        if group not in results:
+            results[group] = {'requests': 0, 'cost': 0.0, 'failover_cost': 0.0, 'refused': 0}
+
+        res = results[group]
+        res['requests'] += 1
+
+        cost = rec.get('cost', 0)
+        if cost is None:
+            cost = 0
+        res['cost'] += cost
+
+        if 'failover_from' in rec:
+            res['failover_cost'] += cost
+
+        status = rec.get('status', 0)
+        try:
+            if status and int(status) >= 400:
+                res['refused'] += 1
+        except (ValueError, TypeError):
+            pass
+
+    for group in results:
+        results[group]['cost'] = round(results[group]['cost'], 6)
+        results[group]['failover_cost'] = round(results[group]['failover_cost'], 6)
+
+    return results
 
 def short(s, n=28):
     s = str(s)
@@ -138,6 +182,37 @@ def row_segs(kind, payload, cat, picks, keyed=False):
             state, role = "○  no key", "bad"
         return [(pad(u.get("label") or u["name"], 21), "id"), (pad(host, 22), "price"),
                 (pad(state, 16), role)]
+    if kind == "menu":
+        n, r, primary = payload
+        by_id = {m["id"]: m for m in cat.get("models", [])}
+        m = by_id.get(r["model"]) or {}
+        label = r.get("label") or m.get("name") or r["model"]
+        return [(pad("%2d." % n, 4), "note"), (pad(short(label, 30), 32), "id"),
+                (pad(short(r["model"], 34), 36), "price"),
+                ("\u2605 new sessions start here" if primary else "", "star")]
+    if kind == "pol":
+        key, row = payload
+        return [(pad(short(key, 34), 36), "id"), (pad("data " + row.get("data", "\u2014"), 13),
+                 "bad" if row.get("data") in ("zdr", "claude") else "price"),
+                ("tier " + row.get("tier", "\u2014"), "tier")]
+    if kind == "spend":
+        group, st = payload
+        segs = [(pad(group, 27), "id"), (pad("$%.4f" % st["cost"], 11), "price"),
+                (pad("%d req" % st["requests"], 10), "tier")]
+        if st.get("failover_cost"):
+            segs.append((pad("$%.4f failover" % st["failover_cost"], 18), "bad"))
+        if st.get("refused"):
+            segs.append(("%d refused" % st["refused"], "bad"))
+        return segs
+    if kind == "keyuse":
+        label, use = payload
+        if use is None:
+            return [(pad(label, 27), "id"), ("checking…", "note")]
+        if isinstance(use, str):
+            return [(pad(label, 27), "id"), (use, "bad")]
+        used, limit, reset = use
+        txt = "$%.2f of $%s %s" % (used, "%g" % limit if limit else "∞", reset or "")
+        return [(pad(label, 27), "id"), (txt, "bad" if limit and used >= 0.8 * limit else "ok")]
     if kind == "prov":
         p = cat["providers"][payload]
         host = p.get("host", "?") + (p.get("path_prefix") or "")
@@ -206,6 +281,70 @@ def new_upstream(cat, name, label="", key_file=""):
             "note": "metered; sent only for models that pick it"}
 
 
+# ---- the /model menu, fallbacks, folder policy (pure, so testable) ----------
+
+MAX_MENU = 10            # Claude Code folds the rest behind "… +N models"
+FALLBACK_MAX_IN = 0.20   # $/1M input: a cash fallback must be Flash-class (CLAUDE.md)
+POLICY_DATA = ["any", "zdr", "claude"]
+POLICY_TIER = ["pro", "flash"]
+
+
+def in_menu(cat, mid):
+    return any(r.get("model") == mid for r in cat.get("picker_lineup", []))
+
+
+def menu_toggle(cat, mid):
+    """Add mid to the end of the /model menu, or take it off. Gateway ids also go
+    in picker.models, which is what the router publishes to the picker cache."""
+    lineup = cat.setdefault("picker_lineup", [])
+    picks = cat.setdefault("picker", {}).setdefault("models", [])
+    if in_menu(cat, mid):
+        cat["picker_lineup"] = [r for r in lineup if r.get("model") != mid]
+        if mid in picks:
+            picks.remove(mid)
+    else:
+        lineup.append({"model": mid})
+        if "/" in mid and mid not in picks:
+            picks.append(mid)
+
+
+def menu_move(cat, mid, delta):
+    lineup = cat.get("picker_lineup", [])
+    i = next((n for n, r in enumerate(lineup) if r.get("model") == mid), None)
+    j = None if i is None else i + delta
+    if j is not None and 0 <= j < len(lineup):
+        lineup[i], lineup[j] = lineup[j], lineup[i]
+
+
+def fallback_problems(cat, ids):
+    """Why each fallback breaks the money rule: a failover that can bill must be a
+    plan model or the cheapest capable (<= $0.20/1M in), never a pro-tier one."""
+    by_id = {m["id"]: m for m in cat.get("models", [])}
+    out = []
+    for i in ids:
+        m = by_id.get(i)
+        if not m:
+            out.append("%s is not in the catalog, so it can't be a fallback" % i)
+        elif m.get("billing") != "subscription" and (m.get("price") or [9e9])[0] > FALLBACK_MAX_IN:
+            out.append("%s costs $%g/1M in -- a fallback must be a plan model or <= $%.2f/1M"
+                       % (i, (m.get("price") or [0])[0], FALLBACK_MAX_IN))
+    return out
+
+
+def loosens(old, new):
+    """True when a data policy change lets data go to more places."""
+    rank = {d: i for i, d in enumerate(POLICY_DATA)}          # any < zdr < claude
+    return rank.get(new, 0) < rank.get(old, 0)
+
+
+def cycle_policy(cat, key, field):
+    pol = cat.setdefault("folder_policy", {"_default": {"data": "any", "tier": "pro"}})
+    row = pol.setdefault(key, {})
+    order = POLICY_DATA if field == "data" else POLICY_TIER
+    cur = row.get(field) or (pol.get("_default") or {}).get(field) or order[0]
+    row[field] = order[(order.index(cur) + 1) % len(order)] if cur in order else order[0]
+
+
 def row_text(kind, payload, cat, picks, keyed=False):
     return "".join(t for t, _ in row_segs(kind, payload, cat, picks, keyed))
 
@@ -239,7 +378,47 @@ class UI(object):
         self.dirty = False
         self.status = ""
         self.rows = []
+        try:
+            with open(sb.SETTINGS) as f:
+                self.primary = json.load(f).get("model", "")
+        except (OSError, ValueError):
+            self.primary = ""
+        self.new_primary = None
+        self.keyuse = {}
+        self.refresh_spend()
         self.rebuild()
+
+    # ---------- spend ----------
+
+    def refresh_spend(self):
+        """Today's ledger totals now; each OpenRouter key's usage from its /key
+        endpoint in the background, so opening the editor never waits on the network."""
+        import threading, time
+        try:
+            with open(os.path.join(HERE, "requests.log")) as f:
+                lines = f.readlines()[-30000:]
+        except OSError:
+            lines = []
+        self.spend = spend_today(lines, time.strftime("%Y-%m-%d"))
+        ups = [u for u in self.cat.get("upstreams", []) if u.get("verify_url") and u.get("key_file")]
+        for u in ups:
+            self.keyuse[u["name"]] = None
+
+        def fetch(u):
+            import urllib.request
+            key = self.sb.read_keyfile(u["key_file"])
+            if not key:
+                self.keyuse[u["name"]] = "no key"
+                return
+            try:
+                req = urllib.request.Request(u["verify_url"], headers={"Authorization": "Bearer " + key})
+                d = json.load(urllib.request.urlopen(req, timeout=15)).get("data", {})
+                self.keyuse[u["name"]] = (d.get("usage_daily", d.get("usage", 0)) or 0,
+                                          d.get("limit"), d.get("limit_reset") or "")
+            except Exception as e:
+                self.keyuse[u["name"]] = "unreachable (%s)" % type(e).__name__
+        for u in ups:
+            threading.Thread(target=fetch, args=(u,), daemon=True).start()
 
     # ---------- model ----------
 
@@ -251,6 +430,7 @@ class UI(object):
         return bool(self.sb.read_keyfile(p.get("key_file", "")))
 
     def rebuild(self):
+        self._drawn_top = None           # rows may have shifted: repaint in full next draw
         rows = [("head", "PROVIDERS")]
         # Every credential path the router can use, not just the vendor-direct
         # ones. `upstreams` is display-only config -- the router never reads it --
@@ -262,13 +442,35 @@ class UI(object):
             rows.append(("prov", name))
         if len(rows) == 1:
             rows.append(("note", "none declared"))
-        rows += [("blank", ""), ("head", "MODELS")]
+        primary = self.new_primary or self.primary
+        lineup = self.cat.get("picker_lineup", [])
+        rows += [("blank", ""), ("head", "MENU   /model, in order  \u00b7  [ ] move  \u00b7  enter = start here  \u00b7  d remove")]
+        for n, r in enumerate(lineup, 1):
+            rows.append(("menu", (n, r, r.get("model") == primary)))
+        if len(lineup) > MAX_MENU:
+            rows.append(("note", "\u26a0 %d rows: Claude Code folds everything after row %d behind \u2026"
+                         % (len(lineup), MAX_MENU)))
+        if not lineup:
+            rows.append(("note", "empty -- space on a model adds it"))
+        rows += [("blank", ""), ("head", "MODELS   space = on/off the menu")]
         by_family = {}
         for m in self.cat.get("models", []):
             by_family.setdefault(m.get("family", "?"), []).append(m)
         for fam in sorted(by_family):
             for m in sorted(by_family[fam], key=lambda x: (x.get("price") or [0])[0]):
                 rows.append(("model", m))
+        pol = self.cat.get("folder_policy", {})
+        rows += [("blank", ""), ("head", "POLICY   enter = data any/zdr/claude  \u00b7  t tier  \u00b7  a add folder  \u00b7  d forget")]
+        for key in sorted(k for k in pol if not k.startswith("_") or k == "_default"):
+            rows.append(("pol", (key, pol[key])))
+        rows += [("blank", ""), ("head", "SPEND   today, from requests.log  \u00b7  r refresh")]
+        for group, st in sorted(self.spend.items(), key=lambda kv: -kv[1]["cost"]):
+            rows.append(("spend", (group, st)))
+        if not self.spend:
+            rows.append(("note", "nothing logged today"))
+        for name in self.keyuse:
+            label = next((u.get("label") or name for u in self.cat.get("upstreams", []) if u["name"] == name), name)
+            rows.append(("keyuse", ("key: " + label, name)))
         self.rows = rows
         if self.sel >= len(rows):
             self.sel = max(0, len(rows) - 1)
@@ -277,13 +479,16 @@ class UI(object):
         kind, payload = self.rows[i]
         if kind == "up":
             return not payload.get("fixed")      # nothing to do for a fixed row
-        return kind in ("prov", "model")
+        return kind in ("prov", "model", "menu", "pol")
 
     def move(self, delta):
+        self.reveal_end = False
         i = self.sel
         while True:
             i += delta
             if i < 0 or i >= len(self.rows):
+                if delta > 0:                # past the last row you can select: show
+                    self.reveal_end = True   # what's below it (SPEND is read-only)
                 return
             if self.selectable(i):
                 self.sel = i
@@ -362,13 +567,20 @@ class UI(object):
         title = "Switchboard"
         if self.dirty:
             title += "  \u2022 unsaved"
-        self.box(0, 0, panel_h, list_w, title, True)
 
         inner_h = panel_h - 2
         if self.sel < self.top:
             self.top = self.sel
         if self.sel >= self.top + inner_h:
             self.top = self.sel - inner_h + 1
+        if getattr(self, "reveal_end", False):     # scrolled to the end, cursor still on screen
+            self.top = max(self.top, min(len(self.rows) - inner_h, self.sel))
+        # Scrolling shifts every row, and ncurses' diff left stale characters
+        # behind when it did (same fault as the model browser's filter): repaint.
+        if self.top != getattr(self, "_drawn_top", self.top):
+            self.scr.clear()          # also set to None by rebuild(), for the same reason
+        self._drawn_top = self.top
+        self.box(0, 0, panel_h, list_w, title, True)   # after any clear(), or it is wiped
 
         y = 1
         for i in range(self.top, min(len(self.rows), self.top + inner_h)):
@@ -390,8 +602,10 @@ class UI(object):
                                             self.keyed(payload)),
                              force="sel" if cur else None, right=edge)
             else:
+                if kind == "keyuse":             # filled in by a background fetch
+                    payload = (payload[0], self.keyuse.get(payload[1]))
                 self.putsegs(y, x, row_segs(kind, payload, self.cat,
-                                            self.picker_set()),
+                                            {r.get("model") for r in self.cat.get("picker_lineup", [])}),
                              force="sel" if cur else None, right=edge)
             y += 1
 
@@ -403,9 +617,14 @@ class UI(object):
         if det_w:
             self.detail(0, list_w + 1, panel_h, det_w)
 
-        self.footer(h - 1, w, [("\u2191\u2193", "move"), ("space", "pick"),
-                               ("enter", "edit"), ("a", "add"), ("d", "del"),
-                               ("l", "login"), ("s", "save"), ("q", "quit")])
+        kind = self.current()[0]
+        keys = {"menu": [("[ ]", "move"), ("enter", "start here"), ("d", "remove")],
+                "pol": [("enter", "data"), ("t", "tier"), ("a", "add folder"), ("d", "forget")],
+                "model": [("space", "menu on/off"), ("enter", "edit"), ("a", "add"), ("d", "del")],
+                }.get(kind, [("enter", "sign in"), ("a", "add key"), ("l", "login")])
+        if self.status:
+            self.put(h - 2, 2, short(self.status, w - 4), attr("note"))
+        self.footer(h - 1, w, [("\u2191\u2193", "move")] + keys + [("s", "save all"), ("q", "quit")])
         self.scr.refresh()
 
     def detail(self, top, left, height, width):
@@ -617,6 +836,11 @@ class UI(object):
                     continue
                 if kind == "list":
                     vals = [x.strip() for x in new.split(",") if x.strip()]
+                    probs = fallback_problems(self.cat, vals) if key == "failover" else []
+                    if probs:
+                        self.put(h - 3, 3, short("\u26a0 not set: " + probs[0], w - 6), attr("bad"))
+                        self.scr.getch()
+                        continue
                     if vals:
                         m[key] = vals
                     else:
@@ -723,6 +947,21 @@ class UI(object):
             elif 32 <= c < 127:
                 q, sel = q + chr(c), 0
 
+    def add_policy(self):
+        path = self.prompt("folder (e.g. ~/Documents/Goldman):", "~/Documents/")
+        if not path or not path.strip():
+            return
+        full = os.path.abspath(os.path.expanduser(path.strip()))
+        if not os.path.isdir(full):
+            self.status = "no such folder: %s" % full
+            return
+        home = os.path.expanduser("~")
+        key = "~" + full[len(home):] if full.startswith(home + "/") else full
+        self.cat.setdefault("folder_policy", {}).setdefault(key, {"data": "zdr"})
+        self.dirty = True
+        self.rebuild()
+        self.status = "%s added as zdr -- enter cycles it" % key
+
     def delete_model(self, m):
         if not self.confirm("remove %s from the catalog?" % m["id"]):
             return
@@ -811,10 +1050,27 @@ class UI(object):
                 self.toggle_pick(payload)
 
     def save(self):
+        """One key for everything the CLI does in four: write the catalog, publish
+        the picker cache, write the /model menu, set the start model, restart the router."""
         self.sb.save(self.cat)
-        self.dirty = False
-        self.shell_out([sys.executable, os.path.join(HERE, "sync-models.py")])
-        self.status = "saved and synced — restart Claude Code for the picker"
+        sb_py = os.path.join(HERE, "switchboard.py")
+        steps = [("sync", [sys.executable, os.path.join(HERE, "sync-models.py")]),
+                 ("menu", [sys.executable, sb_py, "apply"])]
+        if self.new_primary and self.new_primary != self.primary:
+            steps.append(("start model", [sys.executable, sb_py, "route", "--primary", self.new_primary]))
+        steps.append(("router restart", [sys.executable, sb_py, "restart"]))
+        failed = []
+        for name, argv in steps:
+            r = subprocess.run(argv, capture_output=True, text=True)
+            if r.returncode:
+                failed.append("%s: %s" % (name, (r.stderr or r.stdout).strip().splitlines()[-1:] or "exit %d" % r.returncode))
+        if self.new_primary:
+            self.primary, self.new_primary = self.new_primary, None
+        self.dirty = bool(failed)
+        self.refresh_spend()
+        self.rebuild()
+        self.status = ("saved: catalog, picker, /model menu, router restarted -- restart Claude Code to see the menu"
+                       if not failed else "saved the catalog, but " + "; ".join(str(f) for f in failed))
 
     # ---------- loop ----------
 
@@ -853,8 +1109,61 @@ class UI(object):
             elif c == curses.KEY_MOUSE:
                 self.on_mouse()
                 continue
-            elif c == ord(" ") and kind == "model":
-                self.toggle_pick(payload)
+            elif c == ord(" ") and kind in ("model", "menu"):
+                mid = payload["id"] if kind == "model" else payload[1]["model"]
+                menu_toggle(self.cat, mid)
+                self.dirty = True
+                self.status = "%s %s the /model menu" % (mid, "added to" if in_menu(self.cat, mid) else "taken off")
+                self.rebuild()
+                if kind == "model":          # the menu grew or shrank above: stay on the model
+                    self.sel = next((i for i, r in enumerate(self.rows)
+                                     if r[0] == "model" and r[1]["id"] == mid), self.sel)
+            elif c in (ord("["), ord("]")) and kind == "menu":
+                mid = payload[1]["model"]
+                menu_move(self.cat, mid, -1 if c == ord("[") else 1)
+                self.dirty = True
+                self.rebuild()
+                self.sel = next(i for i, r in enumerate(self.rows) if r[0] == "menu" and r[1][1]["model"] == mid)
+            elif c in (10, 13, curses.KEY_ENTER) and kind == "menu":
+                self.new_primary = payload[1]["model"]
+                self.dirty = True
+                self.status = "new sessions will start on %s once saved" % self.new_primary
+                self.rebuild()
+            elif c in (10, 13, curses.KEY_ENTER) and kind == "pol":
+                key = payload[0]
+                before = dict(self.cat["folder_policy"].get(key, {}))
+                cycle_policy(self.cat, key, "data")
+                old = before.get("data") or self.cat["folder_policy"].get("_default", {}).get("data", "any")
+                new = self.cat["folder_policy"][key]["data"]
+                # One stray enter must never widen where a private folder's data can
+                # go: loosening asks, tightening doesn't.
+                if loosens(old, new) and not self.confirm(
+                        "loosen %s from %s to %s? its data could then leave for %s"
+                        % (key, old, new, "any provider" if new == "any" else "ZDR routes")):
+                    self.cat["folder_policy"][key] = before
+                    self.status = "%s kept at %s" % (key, old)
+                else:
+                    self.dirty = True
+                self.rebuild()
+            elif c == ord("t") and kind == "pol":
+                cycle_policy(self.cat, payload[0], "tier")
+                self.dirty = True
+                self.rebuild()
+            elif c == ord("a") and kind == "pol":
+                self.add_policy()
+            elif c == ord("d") and kind == "pol" and payload[0] != "_default":
+                self.cat["folder_policy"].pop(payload[0], None)
+                self.dirty = True
+                self.status = "%s now follows _default" % payload[0]
+                self.rebuild()
+            elif c == ord("d") and kind == "menu":
+                menu_toggle(self.cat, payload[1]["model"])
+                self.dirty = True
+                self.rebuild()
+            elif c == ord("r"):
+                self.refresh_spend()
+                self.rebuild()
+                self.status = "spend refreshed"
             elif c in (10, 13, curses.KEY_ENTER):
                 if kind == "model":
                     self.edit_model(payload)
