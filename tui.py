@@ -629,7 +629,14 @@ class UI(object):
                 self.dirty = True
 
     def add_model(self):
-        mid = self.prompt("model id to add (looked up on OpenRouter):", "")
+        """Pick from OpenRouter's whole list; type an id only if it can't be fetched."""
+        try:
+            listing = list(self.sb.or_models().values())
+        except Exception as e:
+            self.status = "couldn't fetch OpenRouter's list (%s)" % e
+            listing = None
+        mid = self.browse(listing) if listing else self.prompt(
+            "model id to add (looked up on OpenRouter):", "")
         if not mid or not mid.strip():
             return
         self.shell_out([sys.executable, os.path.join(HERE, "switchboard.py"),
@@ -660,6 +667,61 @@ class UI(object):
         self.sel = next(i for i, r in enumerate(self.rows) if r[0] == "up" and r[1] is u)
         self.login_upstream(u)
         self.status = "%s added -- not saved yet; pick it per model under Key" % u["name"]
+
+    def browse(self, listing):
+        """Full-screen filter over OpenRouter's models. Returns an id, or None."""
+        have = {m["id"] for m in self.cat.get("models", [])}
+        q, sel, top, shown = "", 0, 0, None
+        while True:
+            rows = self.sb.browse_rows(listing, q, have)
+            sel = max(0, min(sel, len(rows) - 1))
+            # A new filter moves every row. ncurses' diff against what it thinks is
+            # on screen left stale characters behind, so repaint in full then.
+            if q != shown:
+                self.scr.clear()
+                shown = q
+            else:
+                self.scr.erase()
+            h, w = self.scr.getmaxyx()
+            self.put(0, 2, "Add a model", attr("title"))
+            self.put(0, 15, "%d of %d on OpenRouter" % (len(rows), len(listing)), attr("note"))
+            self.put(1, 2, "filter ", attr("tier"))
+            self.put(1, 9, q + "\u258f", attr("name"))
+            self.put(2, 2, "\u2500" * max(0, w - 5), attr("rule"))
+            body = h - 5
+            top = min(max(top, sel - body + 1), sel)
+            for i, r in enumerate(rows[top:top + body]):
+                y, cur = 3 + i, top + i == sel
+                pr = ("$%s/$%s" % (round(r["price"][0], 3), round(r["price"][1], 3))
+                      if r["price"] else "varies")
+                ctx = "%dK" % ((r["context"] or 0) // 1000)
+                segs = [("\u2713  " if r["added"] else "   ", "ok"),
+                        (pad(short(r["id"], 44), 46), "id"), (pad(pr, 17), "price"),
+                        (pad(ctx, 7), "tier"), (r["name"], "name")]
+                if cur:
+                    self.put(y, 1, "\u258c", attr("sel"))
+                self.putsegs(y, 3, segs, force="sel" if cur else None, right=w - 1)
+            if not rows:
+                self.put(3, 3, "nothing matches", attr("note"))
+            self.footer(h - 1, w, [("type", "filter"), ("\u2191\u2193", "move"),
+                                   ("enter", "add"), ("esc", "back")])
+            self.scr.refresh()
+            c = self.scr.getch()
+            if c == 27:
+                return None
+            if c == curses.KEY_UP:
+                sel -= 1
+            elif c == curses.KEY_DOWN:
+                sel += 1
+            elif c in (curses.KEY_BACKSPACE, 127, 8):
+                q, sel = q[:-1], 0
+            elif c in (10, 13, curses.KEY_ENTER) and rows:
+                if rows[sel]["added"]:
+                    self.status = "%s is already in the catalog" % rows[sel]["id"]
+                    continue
+                return rows[sel]["id"]
+            elif 32 <= c < 127:
+                q, sel = q + chr(c), 0
 
     def delete_model(self, m):
         if not self.confirm("remove %s from the catalog?" % m["id"]):
