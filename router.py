@@ -21,6 +21,9 @@ KEYFILE  = os.path.expanduser("~/.config/openrouter-key")
 # A second OpenRouter key whose workspace has no zero-data-retention guardrail.
 # Only models flagged zdr:false are sent with it -- see or_key().
 NONZDR_KEYFILE = os.path.expanduser("~/.config/openrouter-key-nonzdr")
+# /gemma/or only: its own key with a $2/day OpenRouter credit limit. No fallback
+# to KEYFILE -- falling back would bypass the cap the key exists for.
+GEMMA_KEYFILE = os.path.expanduser("~/.config/openrouter-key-gemma")
 LOGFILE  = os.path.expanduser(os.environ.get(
     "CLAUDE_ROUTER_LOG", "~/.local/share/claude-router/requests.log"))
 # substrings of OpenRouter model ids to surface in /model
@@ -181,6 +184,9 @@ def sanitize(body):
 # providers; sort="throughput" picks the fastest of those.
 PROVIDER_PREFS = {
     "gemini": {"zdr": True, "order": ["google-vertex/global"]},
+    # Bulk audit worker: cheapest ZDR provider, not fastest. Floor $0.045/$0.14
+    # (inference.net) if it qualifies; the ZDR pack lists at $0.15/$0.50.
+    "glm-5.3-flash": {"zdr": True, "sort": "price"},
 }
 DEFAULT_PREFS = {"zdr": True, "sort": "throughput"}
 
@@ -811,6 +817,42 @@ def metered(model):
     return (BY_ID.get(model) or {}).get("billing") != "subscription"
 
 
+# --- turn caps ------------------------------------------------------------
+# Requests per rolling hour on metered models (models.json `turn_caps`). The
+# router never sees an agent session, so the cap is per model: a looping agent
+# hits it within the hour instead of spending all night.
+TURNS = {}
+TURNS_LOCK = threading.Lock()
+
+
+def turn_cap(model):
+    caps = CATALOG.get("turn_caps") or {}
+    if model == "gemma-or":
+        return caps.get("gemma_or_per_hour")
+    if not metered(model):
+        return None
+    price = ((BY_ID.get(model) or {}).get("price") or [-1])[0]
+    for ceiling, cap in caps.get("per_hour") or []:
+        if ceiling is None or 0 <= price < ceiling:
+            return cap
+    return None
+
+
+def take_turn(model):
+    """Count one request against `model`'s cap. False (nothing counted) if full."""
+    cap = turn_cap(model)
+    if cap is None:
+        return True
+    now = time.time()
+    with TURNS_LOCK:
+        q = [t for t in TURNS.get(model, []) if now - t < 3600]
+        if len(q) >= cap:
+            TURNS[model] = q
+            return False
+        TURNS[model] = q + [now]
+        return True
+
+
 def failover_chain(model):
     """Models to try after `model` runs out of capacity, best-first.
 
@@ -1124,6 +1166,14 @@ class Router(BaseHTTPRequestHandler):
                 rec["auto_from"] = requested
             if i:
                 rec["failover_from"] = prepared[i - 1]["model"]
+            if not take_turn(att["model"]):
+                rec.update(status=429, error="turn cap: %s/h" % turn_cap(att["model"]))
+                log_request(rec)
+                if last:
+                    return self.fail(429, "%s hit its Switchboard turn cap (%s requests/hour, "
+                                     "models.json turn_caps). Wait, or pick a plan model."
+                                     % (att["model"], turn_cap(att["model"])))
+                continue
             try:
                 conn, resp = self.issue(method, att, rec)
             except Exception as e:
@@ -1267,9 +1317,12 @@ class Router(BaseHTTPRequestHandler):
             if self.headers.get("authorization"):
                 headers["Authorization"] = self.headers["authorization"]
         elif route == "or":
-            key = read_key(KEYFILE)
+            key = read_key(GEMMA_KEYFILE)
             if not key:
-                return self.fail(500, "no OpenRouter key at ~/.config/openrouter-key")
+                return self.fail(500, "no Gemma OpenRouter key at ~/.config/openrouter-key-gemma")
+            if not take_turn("gemma-or"):
+                return self.fail(429, "/gemma/or hit its turn cap (%s requests/hour)"
+                                 % turn_cap("gemma-or"))
             try:
                 req = json.loads(body)
             except Exception:

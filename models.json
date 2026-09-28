@@ -1,5 +1,5 @@
 {
-  "_comment": "Edit with switchboard.py (add/remove/list), or by hand. Prices are USD per 1M tokens, in/out, recorded when the entry was added — they drift, so treat them as ordering, not billing. 'good_at' is fed verbatim to the router model when Auto picks.",
+  "_comment": "Edit with switchboard.py (add/remove/list), or by hand. Prices are USD per 1M tokens, in/out, recorded when the entry was added \u2014 they drift, so treat them as ordering, not billing. 'good_at' is fed verbatim to the router model when Auto picks.",
   "router_model": "~deepseek/deepseek-v4-flash-latest",
   "fallback": "claude-sonnet-5",
   "_policy_note": "Per-folder data policy and family tier, keyed on the working directory Claude Code reports in its own Environment block. Keys are path prefixes; the LONGEST match wins, so a subfolder inherits unless it names itself. data: 'claude' = Anthropic models only (nothing leaves the plan), 'zdr' = third party allowed but only routes with a zero-data-retention provider - this EXCLUDES vendor subscriptions like Kimi, which retain under the vendor's own terms rather than ours, 'any' = no restriction. 'any' is the default because it is what the router did before this existed; an unlisted folder keeps working exactly as it used to. tier: which variant a ~fam/ family row resolves to, default 'pro' - set 'flash' on a folder to take the cheap variant there. A request with no Environment block (a bare API client, not Claude Code) gets the default: the cwd cannot be known, and failing closed there would break every non-Claude-Code caller.",
@@ -18,7 +18,7 @@
     }
   },
   "_providers_note": "A vendor with its own Anthropic-compatible endpoint and its own subscription, matched on the first segment of the model id. path_prefix is joined to the incoming path, so /coding + /v1/messages -> /coding/v1/messages. The key file is read per request and never cached; your claude.ai token is stripped before the request leaves the machine. Set cache_control false if a vendor rejects the markers, and add to drop_fields anything it 400s on.",
-  "_upstreams_note": "Display only — the router never reads this. Credential paths shown in the editor's PROVIDERS panel. Add rows here as more are wired up.",
+  "_upstreams_note": "Display only \u2014 the router never reads this. Credential paths shown in the editor's PROVIDERS panel. Add rows here as more are wired up.",
   "upstreams": [
     {
       "name": "anthropic",
@@ -62,7 +62,7 @@
       ],
       "label": "Kimi",
       "console_url": "https://www.kimi.com/code",
-      "console_hint": "This is the Kimi For Coding SUBSCRIPTION page. Do not use platform.moonshot.ai — that is the pay-as-you-go console, and its keys are the same shape but 401 against this endpoint.",
+      "console_hint": "This is the Kimi For Coding SUBSCRIPTION page. Do not use platform.moonshot.ai \u2014 that is the pay-as-you-go console, and its keys are the same shape but 401 against this endpoint.",
       "key_pattern": "^[A-Za-z0-9._:\\-]{16,}$",
       "oauth": {
         "host": "https://auth.kimi.com",
@@ -73,7 +73,7 @@
         "_auth_note": "An OAuth bearer goes in Authorization, not x-api-key; login --oauth applies these to the provider on success.",
         "auth_header": "Authorization",
         "auth_prefix": "Bearer",
-        "_headers_note": "Measured 2026-09-04: auth.kimi.com accepts device_authorization and the token poll with NO vendor identity headers — identical responses with and without X-Msh-Platform/Version. So none are sent. Only genuine device info goes, and switchboard does not claim to be kimi_cli. If the backend ever starts requiring an identity, add it here and the disclosure fires again.",
+        "_headers_note": "Measured 2026-09-04: auth.kimi.com accepts device_authorization and the token poll with NO vendor identity headers \u2014 identical responses with and without X-Msh-Platform/Version. So none are sent. Only genuine device info goes, and switchboard does not claim to be kimi_cli. If the backend ever starts requiring an identity, add it here and the disclosure fires again.",
         "headers": {}
       },
       "auth_prefix": "Bearer",
@@ -93,7 +93,7 @@
     "glm": "Z.ai GLM",
     "mimo": "Xiaomi MiMo"
   },
-  "_picker_note": "Gateway rows are published after the six built-in Claude rows. Order this list by how often each is picked by hand — Auto is always first. openrouter/auto is deliberately NOT listed: it is a delegation target for Auto (rule 4), not a hand-pick. Picking it directly can never select a subscription model, so every turn costs cash — the inverse of what Auto is for. Launch with --model openrouter/auto if it is ever wanted explicitly.",
+  "_picker_note": "Gateway rows are published after the six built-in Claude rows. Order this list by how often each is picked by hand \u2014 Auto is always first. openrouter/auto is deliberately NOT listed: it is a delegation target for Auto (rule 4), not a hand-pick. Picking it directly can never select a subscription model, so every turn costs cash \u2014 the inverse of what Auto is for. Launch with --model openrouter/auto if it is ever wanted explicitly.",
   "picker": {
     "families": [
       "mimo"
@@ -108,22 +108,22 @@
       "kimi/k3-256k"
     ]
   },
-  "_lineup_note": "Used by 'picker --apply': the WHOLE /model menu, in order, weighted by how likely each is to be picked by hand. Ten rows is the limit before Claude Code collapses the rest behind '… +N models'. A row with only a 'model' key fills its label and description from the catalog (blurb + price); give label/description explicitly for Claude ids, which are not catalog entries. Anything left out is still routable by Auto.",
+  "_lineup_note": "Used by 'picker --apply': the WHOLE /model menu, in order, weighted by how likely each is to be picked by hand. Ten rows is the limit before Claude Code collapses the rest behind '\u2026 +N models'. A row with only a 'model' key fills its label and description from the catalog (blurb + price); give label/description explicitly for Claude ids, which are not catalog entries. Anything left out is still routable by Auto.",
   "picker_lineup": [
     {
       "model": "opus[1m]",
       "label": "Opus (1M)",
-      "description": "Deep reasoning and big refactors · plan quota"
+      "description": "Deep reasoning and big refactors \u00b7 plan quota"
     },
     {
       "model": "claude-fable-5-1[1m]",
       "label": "Fable (1M)",
-      "description": "Hardest and longest-running tasks · plan quota"
+      "description": "Hardest and longest-running tasks \u00b7 plan quota"
     },
     {
       "model": "claude-sonnet-5[1m]",
       "label": "Sonnet (1M)",
-      "description": "Fast workhorse for routine coding · plan quota"
+      "description": "Fast workhorse for routine coding \u00b7 plan quota"
     },
     {
       "model": "~x-ai/grok-latest"
@@ -131,12 +131,12 @@
     {
       "model": "haiku",
       "label": "Haiku",
-      "description": "Quick answers and light tool use · plan quota"
+      "description": "Quick answers and light tool use \u00b7 plan quota"
     },
     {
       "model": "~fam/mimo",
       "label": "Xiaomi MiMo (no ZDR)",
-      "description": "Cheap flagship · pro by default, flash per folder · $0.44/$0.87 per 1M"
+      "description": "Cheap flagship \u00b7 pro by default, flash per folder \u00b7 $0.44/$0.87 per 1M"
     },
     {
       "model": "~z-ai/glm-latest"
@@ -151,7 +151,7 @@
       "model": "deepseek/deepseek-v4-pro"
     }
   ],
-  "_failover_note": "On 402/429/529 the router retries the next model here before answering. 401/403 is NOT included: a bad credential must never silently drain a different quota. A target containing '/' is METERED — failing over to one spends cash, so these are set deliberately, not by default.",
+  "_failover_note": "On 402/429/529 the router retries the next model here before answering. 401/403 is NOT included: a bad credential must never silently drain a different quota. A target containing '/' is METERED \u2014 failing over to one spends cash, so these are set deliberately, not by default.",
   "failover_default": [],
   "models": [
     {
@@ -350,8 +350,8 @@
         "react"
       ],
       "source": "Arena WebDev #1 (1679) Jul 2026; Vercel Next.js eval tied #1 at 92%",
-      "blurb": "Frontend — React, CSS, layout",
-      "_tier_note": "upstream_id/context are DISCOVERED, not assumed: `switchboard.py login` tries upstream_candidates best-first against the real key and writes whichever the plan actually serves. No official source states whether Kimi Code's 1M model is tier-gated, so do not trust a blog for it — re-run `login --check` after any plan change.",
+      "blurb": "Frontend \u2014 React, CSS, layout",
+      "_tier_note": "upstream_id/context are DISCOVERED, not assumed: `switchboard.py login` tries upstream_candidates best-first against the real key and writes whichever the plan actually serves. No official source states whether Kimi Code's 1M model is tier-gated, so do not trust a blog for it \u2014 re-run `login --check` after any plan change.",
       "failover": [
         "moonshotai/kimi-k3"
       ]
@@ -374,7 +374,7 @@
         "react"
       ],
       "source": "Arena WebDev #1 (1679) Jul 2026; Vercel Next.js eval tied #1 at 92%",
-      "blurb": "Frontend — React, CSS, layout"
+      "blurb": "Frontend \u2014 React, CSS, layout"
     },
     {
       "id": "openrouter/auto",
@@ -422,7 +422,7 @@
       "context": 262144,
       "good_at": "K3 at a 256K window, which Kimi documents as drawing LESS membership quota than full k3 for routine work. Prefer over kimi/k3 whenever the task fits 256K.",
       "upstream_id": "k3-256k",
-      "blurb": "K3 at 256K — less Kimi quota"
+      "blurb": "K3 at 256K \u2014 less Kimi quota"
     },
     {
       "id": "xiaomi/mimo-v2.6-flash",
@@ -461,9 +461,21 @@
       ],
       "context": 500000,
       "good_at": "long-running software engineering, agentic coding and knowledge work - pinned successor to the grok-latest alias, 500K context at $1.60/$4.80 per 1M. Pick over grok-latest when 4.7 itself is wanted"
+    },
+    {
+      "id": "z-ai/glm-5.3-flash",
+      "name": "Z.ai: GLM 5.3 Flash",
+      "family": "glm",
+      "tier": "flash",
+      "price": [
+        0.15,
+        0.5
+      ],
+      "context": 1310720,
+      "good_at": "cheap agentic read-and-report work at 1M context - vault audits, sweeps, checklists. $0.045/$0.14 floor on inference.net, ZDR providers up to $0.15/$0.50"
     }
   ],
-  "_arrow_note": "The ←/→ row. Claude Code's effort slider reaches the wire as output_config.effort, and a row declared via ANTHROPIC_CUSTOM_MODEL_OPTION with SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort gets that slider even as a gateway id. So one picker row carries this shortlist and the arrows choose between them. Ordered weakest to strongest; an unmapped level falls to the strongest set. Published as a picker row with behavesAs rather than via ANTHROPIC_CUSTOM_MODEL_OPTION: replaceBuiltInOptions hides that env var's row outright (stated in the 2.1.278 binary), so with a lineup in place the env route cannot work. The modelPicker schema is {model, label?, description?, behavesAs?}.",
+  "_arrow_note": "The \u2190/\u2192 row. Claude Code's effort slider reaches the wire as output_config.effort, and a row declared via ANTHROPIC_CUSTOM_MODEL_OPTION with SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort gets that slider even as a gateway id. So one picker row carries this shortlist and the arrows choose between them. Ordered weakest to strongest; an unmapped level falls to the strongest set. Published as a picker row with behavesAs rather than via ANTHROPIC_CUSTOM_MODEL_OPTION: replaceBuiltInOptions hides that env var's row outright (stated in the 2.1.278 binary), so with a lineup in place the env route cannot work. The modelPicker schema is {model, label?, description?, behavesAs?}.",
   "arrow_models": {
     "low": "~z-ai/glm-latest",
     "medium": "deepseek/deepseek-v4-pro",
@@ -471,7 +483,7 @@
     "xhigh": "kimi/k3",
     "max": "openrouter/auto"
   },
-  "_effort_note": "The ←/→ effort slider, applied to the model you picked instead of swapping it. Claude Code sends the level as output_config.effort; it is an Anthropic-only field, so sanitize() reads it and translates before trimming. Budgets are THINKING tokens and they bill as output tokens, so this is a real cost lever - raising max is raising a bill. Measured 2026-09-21 on api/v1/messages: {\"thinking\":{\"type\":\"disabled\"}} is honoured (zero thinking emitted), and OpenRouter's own reasoning.effort is accepted too, so both are sent and whichever the upstream honours wins. Measured on xiaomi/mimo-v2.6-pro, same prompt, 2026-09-22: disabled -> 0 thinking chars, budget 1024 -> 4,275, budget 6000 -> 5,907. So the budget is a CEILING, not a target - at 1024 it capped thinking at roughly its limit, and at 6000 the model spent only ~1,500 tokens because it needed no more. Raising max therefore raises what a hard turn MAY spend, not what an easy one does - and the curve FLATTENS above roughly 6000: same prompt, 6000 -> 5,907 chars, 12000 -> 6,003, 6976 -> 6,119, all within noise. So the budget only really binds at the LOW end. Separately measured 2026-09-22, reasoning.effort ALONE on the same prompt: low -> 5,003 chars, high -> 6,122, a genuine 22% spread. So OpenRouter's lever IS honoured here, contradicting the older deepseek-v4-pro finding - effort support is per-model, not per-endpoint. The two are kept together because they are complementary: effort supplies the spread across low/medium/high, the budget supplies a hard floor-side cap. Note OpenRouter's effort has only three stops, and the budget is flat up there, so on an OpenRouter model xhigh and max are both effectively 'high' - the top of the dial is an upstream limit, not a bug. A level is clamped to max_tokens-1024, which Anthropic requires; below 1024 thinking is disabled outright rather than sent invalid.",
+  "_effort_note": "The \u2190/\u2192 effort slider, applied to the model you picked instead of swapping it. Claude Code sends the level as output_config.effort; it is an Anthropic-only field, so sanitize() reads it and translates before trimming. Budgets are THINKING tokens and they bill as output tokens, so this is a real cost lever - raising max is raising a bill. Measured 2026-09-21 on api/v1/messages: {\"thinking\":{\"type\":\"disabled\"}} is honoured (zero thinking emitted), and OpenRouter's own reasoning.effort is accepted too, so both are sent and whichever the upstream honours wins. Measured on xiaomi/mimo-v2.6-pro, same prompt, 2026-09-22: disabled -> 0 thinking chars, budget 1024 -> 4,275, budget 6000 -> 5,907. So the budget is a CEILING, not a target - at 1024 it capped thinking at roughly its limit, and at 6000 the model spent only ~1,500 tokens because it needed no more. Raising max therefore raises what a hard turn MAY spend, not what an easy one does - and the curve FLATTENS above roughly 6000: same prompt, 6000 -> 5,907 chars, 12000 -> 6,003, 6976 -> 6,119, all within noise. So the budget only really binds at the LOW end. Separately measured 2026-09-22, reasoning.effort ALONE on the same prompt: low -> 5,003 chars, high -> 6,122, a genuine 22% spread. So OpenRouter's lever IS honoured here, contradicting the older deepseek-v4-pro finding - effort support is per-model, not per-endpoint. The two are kept together because they are complementary: effort supplies the spread across low/medium/high, the budget supplies a hard floor-side cap. Note OpenRouter's effort has only three stops, and the budget is flat up there, so on an OpenRouter model xhigh and max are both effectively 'high' - the top of the dial is an upstream limit, not a bug. A level is clamped to max_tokens-1024, which Anthropic requires; below 1024 thinking is disabled outright rather than sent invalid.",
   "effort_budgets": {
     "low": 2048,
     "medium": 6000,
@@ -479,6 +491,24 @@
     "xhigh": 24000,
     "max": 48000
   },
-  "_behaves_as_note": "OFF as of 2026-09-22 (was claude-opus-4-8). Set it back to \"claude-opus-4-8\" and re-run `picker --apply` to restore the ←/→ slider on gateway rows. Turned off because on an OpenRouter model the dial only has three real stops: OpenRouter's reasoning.effort tops out at 'high' and the thinking budget is flat above ~6000, so xhigh and max both behave as high. A five-stop dial where two stops do nothing is worse than no dial. The router-side translation in sanitize() is kept and still tested - it is simply dormant, because with no behavesAs Claude Code sends no effort at all and every request falls back to the flat THINKING_BUDGET, exactly as before any of this. behavesAs maps an id Claude Code does not know onto one it does, for prompt profile, capability and effort defaults; the effort CAPABILITY is what makes the slider appear on the row at all.",
-  "picker_behaves_as": null
+  "_behaves_as_note": "OFF as of 2026-09-22 (was claude-opus-4-8). Set it back to \"claude-opus-4-8\" and re-run `picker --apply` to restore the \u2190/\u2192 slider on gateway rows. Turned off because on an OpenRouter model the dial only has three real stops: OpenRouter's reasoning.effort tops out at 'high' and the thinking budget is flat above ~6000, so xhigh and max both behave as high. A five-stop dial where two stops do nothing is worse than no dial. The router-side translation in sanitize() is kept and still tested - it is simply dormant, because with no behavesAs Claude Code sends no effort at all and every request falls back to the flat THINKING_BUDGET, exactly as before any of this. behavesAs maps an id Claude Code does not know onto one it does, for prompt profile, capability and effort defaults; the effort CAPABILITY is what makes the slider appear on the row at all.",
+  "picker_behaves_as": null,
+  "_turn_caps_note": "Requests per rolling hour on every metered (OpenRouter) model, so a looping agent stops instead of spending. Tiers by input $/1M: the first [max_price, cap] the model's price is under wins; null = everything else, incl. unknown and openrouter/auto. A capped model drops out of its failover chain; if nothing is left the request gets a 429. At ~100K uncached tokens a turn: 600/h of Flash-class <= ~$3/h, 120/h at $2/1M <= ~$24/h, 40/h of Kimi K3 ($3/1M) <= ~$12/h. /gemma/or has its own cap plus its own key (~/.config/openrouter-key-gemma, $2/day at OpenRouter).",
+  "turn_caps": {
+    "per_hour": [
+      [
+        0.5,
+        600
+      ],
+      [
+        2.0,
+        120
+      ],
+      [
+        null,
+        40
+      ]
+    ],
+    "gemma_or_per_hour": 300
+  }
 }
