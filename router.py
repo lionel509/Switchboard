@@ -44,6 +44,14 @@ SURFACE  = [s for s in os.environ.get("CLAUDE_ROUTER_MODELS", "grok").split(",")
 GEMMA_LOCAL = os.environ.get("CLAUDE_ROUTER_GEMMA_LOCAL", "http://127.0.0.1:8000")
 GEMMA_OR_MODEL = "google/gemma-4-31b-it"
 
+
+def gemma_or_body(req):
+    """The harness request as sent to OpenRouter: the real model name, and the
+    CHEAPEST zero-retention provider. Providers of this one model ranged
+    $0.08-$0.75/1M input on 2026-09-28, and left to OpenRouter 42% of calls
+    landed above $0.09 -- a quarter of the day's spend for the same tokens."""
+    return dict(req, model=GEMMA_OR_MODEL, provider={"zdr": True, "sort": "price"})
+
 CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")
 
 
@@ -1527,9 +1535,7 @@ class Router(BaseHTTPRequestHandler):
                 req = json.loads(body)
             except Exception:
                 return self.fail(400, "body is not JSON")
-            req["model"] = GEMMA_OR_MODEL
-            req["provider"] = {"zdr": True}
-            body = json.dumps(req).encode()
+            body = json.dumps(gemma_or_body(req)).encode()
             host, tls = "openrouter.ai", True
             path = "/api" + rest
             headers["Authorization"] = "Bearer " + key
@@ -1565,6 +1571,13 @@ class Router(BaseHTTPRequestHandler):
                        **{"in": u.get("prompt_tokens"), "out": u.get("completion_tokens")})
             if u.get("cost") is not None:
                 rec["cost"] = u["cost"]
+            cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
+            if cached:
+                rec["cached"] = cached
+        try:                                   # which provider actually served it
+            rec["provider"] = json.loads(data).get("provider")
+        except (ValueError, AttributeError):
+            pass
         log_request(rec)
         self.send_response(resp.status)
         self.send_header("Content-Type", resp.getheader("Content-Type", "application/json"))
