@@ -282,6 +282,9 @@ def new_upstream(cat, name, label="", key_file=""):
 
 # ---- the /model menu, fallbacks, folder policy (pure, so testable) ----------
 
+PAGES = ["Providers", "Menu", "Models", "Policy", "Spend"]      # one per section heading, in order
+SETTINGS_PAGES = [("Basics", ("IDENTITY", "MENU")), ("Routing", ("ROUTING",)),
+                  ("Limits", ("LIMITS",)), ("Notes", ("NOTES",))]
 MAX_MENU = 10            # Claude Code folds the rest behind "… +N models"
 FALLBACK_MAX_IN = 0.20   # $/1M input: a cash fallback must be Flash-class (CLAUDE.md)
 POLICY_DATA = ["any", "zdr", "claude"]
@@ -377,6 +380,17 @@ def fallback_text(cat, m):
     return ", ".join(ids) + ("   \u26a0 %d over the $%.2f/1M rule" % (len(probs), FALLBACK_MAX_IN) if probs else "")
 
 
+def settings_page(rows, page):
+    """The rows of settings_rows() under this page's headings."""
+    want, out, keep = SETTINGS_PAGES[page][1], [], False
+    for r in rows:
+        if r[0] == "head":
+            keep = r[1] in want
+        if keep:
+            out.append(r)
+    return out
+
+
 def settings_rows(cat, m, primary=""):
     """The settings screen as rows: ("head", title) or
     ("field", key, label, kind, shown_value). Rows that cannot apply to this
@@ -458,6 +472,7 @@ class UI(object):
         except (OSError, ValueError):
             self.primary = ""
         self.new_primary = None
+        self.page = 0
         self.keyuse = {}
         self.refresh_spend()
         self.rebuild()
@@ -545,6 +560,12 @@ class UI(object):
         for name in self.keyuse:
             label = next((u.get("label") or name for u in self.cat.get("upstreams", []) if u["name"] == name), name)
             rows.append(("keyuse", ("key: " + label, name)))
+        # One page per section: split at the headings and keep this page's.
+        heads = [i for i, r in enumerate(rows) if r[0] == "head"] + [len(rows)]
+        page = getattr(self, "page", 0)
+        rows = rows[heads[page]:heads[page + 1]]
+        while rows and rows[-1][0] == "blank":
+            rows.pop()
         self.rows = rows
         if self.sel >= len(rows):
             self.sel = max(0, len(rows) - 1)
@@ -642,7 +663,7 @@ class UI(object):
         if self.dirty:
             title += "  \u2022 unsaved"
 
-        inner_h = panel_h - 2
+        inner_h = panel_h - 3                  # row 1 is the tab bar
         if self.sel < self.top:
             self.top = self.sel
         if self.sel >= self.top + inner_h:
@@ -655,11 +676,12 @@ class UI(object):
             self.scr.clear()          # also set to None by rebuild(), for the same reason
         self._drawn_top = self.top
         self.box(0, 0, panel_h, list_w, title, True)   # after any clear(), or it is wiped
+        self.tabs(1, 2, PAGES, getattr(self, "page", 0))
 
-        y = 1
+        y = 2
         for i in range(self.top, min(len(self.rows), self.top + inner_h)):
             kind, payload = self.rows[i]
-            cur = (i == self.sel)
+            cur = (i == self.sel) and self.selectable(i)
             self.put(y, 1, "\u258c" if cur else " ", attr("sel"))
             x, edge = 3, list_w - 1
             if kind == "head":
@@ -686,7 +708,7 @@ class UI(object):
         # scroll position, drawn on the border so it costs no row
         if len(self.rows) > inner_h:
             frac = self.top / float(max(1, len(self.rows) - inner_h))
-            self.put(1 + int(frac * (inner_h - 1)), list_w - 1, "\u2503", attr("sel"))
+            self.put(2 + int(frac * (inner_h - 1)), list_w - 1, "\u2503", attr("sel"))
 
         if det_w:
             self.detail(0, list_w + 1, panel_h, det_w)
@@ -695,10 +717,12 @@ class UI(object):
         keys = {"menu": [("[ ]", "move"), ("enter", "start here"), ("d", "remove")],
                 "pol": [("enter", "data"), ("t", "tier"), ("a", "add folder"), ("d", "forget")],
                 "model": [("space", "menu on/off"), ("enter", "edit"), ("a", "add"), ("d", "del")],
-                }.get(kind, [("enter", "sign in"), ("a", "add key"), ("l", "login")])
+                }.get(kind, [("r", "refresh")] if PAGES[getattr(self, "page", 0)] == "Spend"
+                      else [("enter", "sign in"), ("a", "add key"), ("l", "login")])
         if self.status:
             self.put(h - 2, 2, short(self.status, w - 4), attr("note"))
-        self.footer(h - 1, w, [("\u2191\u2193", "move")] + keys + [("s", "save all"), ("q", "quit")])
+        self.footer(h - 1, w, [("\u2190\u2192", "page"), ("\u2191\u2193", "move")] + keys
+                    + [("s", "save all"), ("q", "quit")])
         self.scr.refresh()
 
     def detail(self, top, left, height, width):
@@ -761,6 +785,21 @@ class UI(object):
                     y += 1
         else:
             self.box(top, left, height, width, "", False)
+
+    def tabs(self, y, x, names, cur):
+        """1 Providers  2 Menu  ... with the current page highlighted."""
+        for i, n in enumerate(names):
+            label = " %d %s " % (i + 1, n)
+            x = self.put(y, x, label, attr("sel" if i == cur else "meta"))
+            x += 1
+        return x
+
+    def go_page(self, p):
+        self.page = p % len(PAGES)
+        self.sel = self.top = 0
+        self.rebuild()
+        if self.rows and not self.selectable(self.sel):
+            self.move(1)
 
     def footer(self, y, w, pairs):
         x = 2
@@ -858,21 +897,22 @@ class UI(object):
 
     def edit_model(self, m):
         """Every setting one model has, grouped, on one screen (#19)."""
-        fsel, top, note = 0, 0, ""
+        fsel, top, note, spage = 0, 0, "", 0
         tiers = sorted({x.get("tier") for x in self.cat.get("models", []) if x.get("tier")})
         while True:
-            rows = settings_rows(self.cat, m, self.new_primary or self.primary)
+            rows = settings_page(settings_rows(self.cat, m, self.new_primary or self.primary), spage)
             fields = [i for i, r in enumerate(rows) if r[0] == "field"]
             fsel = max(0, min(fsel, len(fields) - 1))
             self.scr.clear()
             h, w = self.scr.getmaxyx()
             self.put(0, 2, m["id"], attr("title"))
             self.put(0, len(m["id"]) + 4, "%s \u00b7 %s" % (m.get("name", ""), price_of(m)), attr("note"))
-            self.put(1, 2, "\u2500" * max(0, w - 5), attr("rule"))
-            body = h - 5
+            self.tabs(1, 2, [n for n, _ in SETTINGS_PAGES], spage)
+            self.put(2, 2, "\u2500" * max(0, w - 5), attr("rule"))
+            body = h - 6
             cur = fields[fsel]
             top = min(max(top, cur - body + 1), cur)
-            for y, i in enumerate(range(top, min(len(rows), top + body)), start=2):
+            for y, i in enumerate(range(top, min(len(rows), top + body)), start=3):
                 r = rows[i]
                 if r[0] == "head":
                     self.put(y, 3, r[1], attr("head"))
@@ -887,13 +927,18 @@ class UI(object):
                 self.put(y, 21, short(val, max(10, w - 25)), attr("sel" if on else role))
             if note:
                 self.put(h - 3, 3, short(note, w - 6), attr("bad" if note.startswith("\u26a0") else "note"))
-            self.footer(h - 1, w, [("\u2191\u2193", "setting"), ("enter", "change"), ("t", "test it"),
+            self.footer(h - 1, w, [("\u2190\u2192", "page"), ("\u2191\u2193", "setting"), ("enter", "change"), ("t", "test it"),
                                    ("p", "refresh price"), ("d", "delete"), ("esc", "back")])
             self.scr.refresh()
             c = self.scr.getch()
             note = ""
             if c in (27, ord("q")):
                 return
+            if c in (curses.KEY_RIGHT, curses.KEY_LEFT, 9) or ord("1") <= c <= ord("0") + len(SETTINGS_PAGES):
+                spage = ((spage + (1 if c in (curses.KEY_RIGHT, 9) else -1)) if c in (curses.KEY_RIGHT, curses.KEY_LEFT, 9)
+                         else c - ord("1")) % len(SETTINGS_PAGES)
+                fsel = top = 0
+                continue
             if c in (curses.KEY_UP, ord("k")):
                 fsel = max(0, fsel - 1)
                 continue
@@ -1289,6 +1334,12 @@ class UI(object):
                 self.move(-1)
             elif c in (curses.KEY_DOWN, ord("j")):
                 self.move(1)
+            elif c in (curses.KEY_RIGHT, 9):
+                self.go_page(self.page + 1)
+            elif c in (curses.KEY_LEFT, getattr(curses, "KEY_BTAB", -2)):
+                self.go_page(self.page - 1)
+            elif ord("1") <= c <= ord("0") + len(PAGES):
+                self.go_page(c - ord("1"))
             elif c == curses.KEY_RESIZE:
                 continue
             elif c == curses.KEY_MOUSE:
