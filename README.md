@@ -30,14 +30,18 @@ Two files, ~350 lines, Python standard library only. No dependencies.
 
 One rule, on the `model` field of each request:
 
-| Model id | Upstream | Credential |
-|---|---|---|
-| bare — `claude-opus-5` | `api.anthropic.com` | whatever the client sent, **forwarded untouched** |
-| contains `/` — `~x-ai/grok-latest` | `openrouter.ai` | `~/.config/openrouter-key` |
+| Model id | Upstream | Credential | Billing |
+|---|---|---|---|
+| bare — `claude-opus-5` | `api.anthropic.com` | whatever the client sent, **forwarded untouched** | your claude.ai plan |
+| vendor in `providers` — `kimi/k3` | that vendor's own endpoint | its own key file | **that vendor's plan** |
+| contains `/` — `~x-ai/grok-latest` | `openrouter.ai` | `~/.config/openrouter-key` | metered per token |
+
+The vendor prefix is checked first, so `kimi/k3` and `moonshotai/kimi-k3` are the same model
+bought two different ways and stay distinguishable — subscription and metered, side by side.
 
 Your subscription token is never read, stored, or logged. It is relayed verbatim on the
-Anthropic path, and **stripped** on the OpenRouter path — `Authorization`, `x-api-key` and
-`anthropic-beta` are removed and replaced with the OpenRouter bearer.
+Anthropic path, and **stripped** on both third-party paths — `Authorization`, `x-api-key` and
+`anthropic-beta` are removed and replaced with that provider's credential.
 
 Two transforms make non-Claude models work at all:
 
@@ -49,6 +53,169 @@ Two transforms make non-Claude models work at all:
 
 Each request appends one JSON object to `requests.log` — upstream, model requested vs. model
 actually served, latency, tokens, and cost when reported.
+
+## Outside subscriptions
+
+A flat-fee coding plan from another vendor is a third kind of model: no cash per token, like
+your Claude plan, but drawn from a different quota. Vendors that ship an Anthropic-compatible
+endpoint (Kimi For Coding, and others following it) plug in as a `providers` entry:
+
+```json
+"providers": {
+  "kimi": {
+    "host": "api.kimi.com",
+    "path_prefix": "/coding",
+    "key_file": "~/.config/kimi-key",
+    "auth_header": "x-api-key",
+    "cache_control": true,
+    "drop_fields": ["context_management", "container", "mcp_servers"]
+  }
+}
+```
+
+Then add the model, and the vendor prefix is what routes it:
+
+```sh
+./switchboard.py add k3 --provider kimi --upstream-id 'k3[1m]' \
+    --name 'Kimi K3 (sub)' --specialty frontend \
+    --good-at 'React, CSS, layout. No cash; consumes Kimi quota, not Claude quota.'
+./switchboard.py picker --add kimi/k3 --apply && ./switchboard.py sync
+./switchboard.py login kimi
+```
+
+### `login` — there is no `/login` for these
+
+Claude Code's `/login` and `claude auth login` are hardcoded to *"Sign in with your Anthropic
+account"*; the only provider-specific setup commands in the binary are `/setup-bedrock` and
+`/setup-vertex`. A vendor subscription has no login path into Claude Code at all — it is a key
+file, and that is the end of it.
+
+`switchboard login` is the nearest equivalent, and it earns its place over
+`printf > keyfile` by **verifying the key against the vendor before storing it**:
+
+```
+$ switchboard login
+Outside subscriptions:
+  1. kimi     api.kimi.com/coding          ✗ no key
+which: 1
+Key page for Kimi:
+  https://www.kimi.com/coding
+⚠ This is the Kimi For Coding SUBSCRIPTION page. Do not use platform.moonshot.ai —
+  that is the pay-as-you-go console, and its keys are the same shape but 401 here.
+open it in the browser? [Y/n]
+
+Copy the key, then press Enter and I will read it from the clipboard.
+Or type it here instead — it is not echoed and never enters shell history.
+key [Enter = clipboard]:
+  from clipboard: sk-abc…7f21
+✗ kimi rejected the key (HTTP 401): The API Key appears to be invalid…
+  Usual cause: the wrong console. api.kimi.com/coding only accepts its subscription credentials.
+  NOT saved. Re-run with --force to store it regardless.
+```
+
+Each step of that exists because of a specific way the bare prompt failed.
+
+**The provider name is a list, not something to remember.** `login` with no argument shows
+every declared provider with whether its key is actually stored, and takes a number.
+
+**The console URL comes first.** The wrong-page 401 is the failure this command exists to
+catch, and offering the right page beforehand catches it earlier than any check can. The URL
+is provider config (`console_url`), not code — `login <p> --set-console <url>` corrects it
+without editing JSON, which matters because vendors move these pages and this one is a
+best guess rather than a documented address.
+
+**The clipboard is the default input.** A key pasted into an invisible prompt cannot be
+checked by eye, so a stray shell prompt, a whole `curl` line, or the wrong line of a page all
+read later as a vendor outage. Press Enter and it reads the clipboard, takes the first line,
+and echoes a masked preview — so the mistake is visible before the round trip. Typing is
+still there for anyone who would rather not put a live credential on the clipboard.
+
+**`key_pattern` warns and asks, it never rejects outright.** It is deliberately loose (`^[A-Za-z0-9._:-]{16,}$`)
+— enough to catch a pasted URL, command or sentence, and nothing more. A vendor may change
+its key shape without telling anyone, so a shape guess must never be able to lock out a key
+that works.
+
+That failure is the one worth catching. A vendor usually sells two products off one account — a
+subscription and pay-as-you-go — whose keys are indistinguishable by eye and are **not
+interchangeable**. Stored blind, the wrong one surfaces as a 401 halfway through a task, which
+reads like the router breaking rather than a paste from the wrong page.
+
+### `login --oauth` — no key at all
+
+Where a vendor runs a device-authorization flow (RFC 8628), there is nothing to find
+and nothing to paste:
+
+```sh
+$ switchboard login kimi --oauth
+Signing in to Kimi via its public OAuth client (17e5f671…) at https://auth.kimi.com.
+A browser page will ask you to approve this device on your account.
+continue? [Y/n]
+
+Approve this device:
+  https://www.kimi.com/code/authorize_device?user_code=NPQ9-VAKB
+  user code: NPQ9-VAKB
+  (opened in your browser)
+
+waiting for approval.... approved
+stored ~/.config/kimi-oauth.json and ~/.config/kimi-key (0600)
+✓ the OAuth token authenticates against api.kimi.com/coding (HTTP 200)
+```
+
+**The router needs no code for this.** The access token is written to `key_file`
+unchanged, so the router still just reads a file and sets a header; the `oauth` block
+carries `auth_header`/`auth_prefix` (`Authorization`/`Bearer`), applied to the provider
+on success. The refresh token and expiry live beside it, for `login <p> --refresh`.
+
+**It verifies the thing that actually matters.** A token good for the vendor's own CLI
+is not automatically good for the endpoint this router targets, so after storing, the
+same probe the key path uses runs against `api.kimi.com/coding` and reports either way.
+
+> [!note]
+> **Nothing here claims to be the vendor's CLI.** The design doc says the token
+> endpoints require device identity headers (`X-Msh-Platform: kimi_cli`, a version, …).
+> Measured 2026-09-04, they do not: `device_authorization` returns 200 and the token
+> poll returns `authorization_pending` with **no** such headers — byte-identical to
+> sending them. So only genuine device info goes, under a stable per-machine id in
+> `~/.config/switchboard-device-id`. The `headers` map in the `oauth` block is empty; if
+> a backend ever starts requiring an identity, putting one there makes `login --oauth`
+> disclose it before sending anything.
+
+`--check` re-tests the stored key without prompting, `--remove` deletes it, `--all` checks
+every provider at once, and `list` marks each provider ✓ or ✗ so an inert row is visible
+before you pick it.
+
+```sh
+$ switchboard login --all
+✓ kimi     key works  (HTTP 200)
+```
+
+**Why not just set `ANTHROPIC_BASE_URL` to the vendor, as their docs tell you?** Because that
+is global. It replaces Anthropic for the whole session and takes every Claude row in the
+picker with it — you would be choosing between vendors at launch instead of per task. Routed
+here, the subscription is one more row in `/model`, and Auto can weigh it against the others.
+
+**Two ids, on purpose.** The 1M Kimi model is `k3[1m]`, and square brackets are Claude Code's
+own syntax for a context variant — an id carrying them can be rewritten before it reaches the
+router. So the picker id stays bare (`kimi/k3`) and `upstream_id` carries what goes on the wire.
+
+**`upstream_id` and `context` are discovered, not assumed.** Whether a plan serves the 1M model
+is not stated by any official page, and the blogs that claim it contradict each other. So
+`upstream_candidates` lists the ids best-first and `login` tries them against the real key,
+printing what came back and writing the winner into the catalog. Re-run `login --check` after a
+plan change — the credential is the only authority on this.
+
+**Context overflow is refused locally.** Claude Code fixes its compaction window once per
+session, from the model it started on, so switching mid-conversation into a smaller model keeps
+packing the old window. A direct request exceeding the catalog `context` gets a 413 from the
+router with something actionable in it, rather than the vendor's own late and opaque error.
+
+**`sanitize_native` is not `sanitize`.** The OpenRouter path injects a `provider` preference
+block, which is OpenRouter's own extension and a 400 anywhere else. A vendor endpoint speaks
+the Messages API by definition, so its body is left intact apart from the model name and
+`drop_fields`; `cache_control` and `thinking` are passed through rather than rewritten.
+
+Each pool logs under its own `upstream` name (`anthropic`, `kimi`, `openrouter`), so
+`requests.log` answers "what is this subscription actually doing" without guesswork.
 
 ## Auto
 
@@ -107,6 +274,50 @@ catalog, no OpenRouter key. Auto degrades to a working model rather than to an e
 > mundane turns stop burning Claude rate limit you would rather spend on real work — not
 > because it is cheaper. That is also why `CLAUDE_ROUTER_AUTO_STRONG` defaults to an Anthropic
 > model: there is no reason to pay OpenRouter for the hard turns.
+
+## The editor
+
+`switchboard` with no subcommand opens a full-screen editor. The subcommands still do
+everything it does — this exists because their equivalents are long: `add` carries ten
+flags, and putting a model in the picker is three chained commands.
+
+```
+╭─ Switchboard ──────────────────────────────────────────╮ ╭─ kimi/k3 ─────────────────╮
+│  PROVIDERS                                             │ │                           │
+│  Claude     api.anthropic.com      —  via Claude Code  │ │ name       Kimi K3 (sub)  │
+│▌ OpenRouter openrouter.ai          ●  signed in        │ │ tier       pro            │
+│  kimi       api.kimi.com/coding    ●  signed in  oauth │ │ price      kimi quota     │
+│                                                        │ │ context    262,144        │
+│  MODELS                                                │ │ in picker  yes            │
+│  ·  claude-opus-5          opus   claude quota  Opus   │ │                           │
+│  ●  ~deepseek/…-flash      flash  $0.05/$0.16   Flash  │ │ ★ frontend, ui, css       │
+│  ●  kimi/k3                pro    kimi quota    K3     │ │                           │
+│  ○  openrouter/auto        auto   varies        Auto   │ │ GOOD AT                   │
+│                                                        │ │ building user interfaces  │
+╰────────────────────────────────────────────────────────╯ ╰───────────────────────────╯
+ ↑↓ move · space pick · enter edit · a add · d del · l login · s save · q quit
+```
+
+Mouse works: click a row to select it, click an already-selected model's marker to toggle
+it, wheel to scroll. `space` toggles a picker row, `enter` opens a field editor (name, blurb, tier, good-at,
+specialties, evidence), `l` or `enter` on a provider runs the sign-in flow, and `s` writes
+`models.json` and syncs. Quitting with unsaved edits asks first. curses from the standard
+library, so the repo stays dependency-free.
+
+> [!note]
+> **`ESC` is deliberately not bound to quit.** `keypad(True)` puts the terminal into
+> application mode, so every arrow key arrives as an escape sequence; if one is ever
+> delivered split, `getch` returns a bare `27`. Binding that to quit would discard unsaved
+> edits on a keystroke the user believes is "move down". `q` quits; `ESC` only backs out of
+> an overlay or cancels a prompt.
+
+`PROVIDERS` lists every credential path the router can take, from `upstreams` in
+`models.json` plus the vendor-direct `providers`. That key is display-only — the router
+never reads it — so rows can be added as more get wired up. Claude's row is not selectable:
+its credential is forwarded from Claude Code and never stored here.
+
+Claude model rows show `·` rather than a marker — they are already in the picker natively, and
+publishing them again would duplicate every Claude row, so the editor refuses the toggle.
 
 ## Models
 
@@ -221,13 +432,27 @@ python3 switchboard.py apply --revert   # restore the built-in menu
 ```
 
 ```
- 1. Opus (1M)        4. DeepSeek Flash    7. Google Gemini Pro
- 2. Sonnet           5. DeepSeek Pro      8. Kimi K3
- 3. Haiku            6. Google Gemini Flash   9. Auto
+ 1. Opus (1M)     Deep reasoning and big refactors · plan quota
+ 2. Fable (1M)    Hardest and longest-running tasks · plan quota
+ 3. Sonnet (1M)   Fast workhorse for routine coding · plan quota
+ 4. xAI Grok      2M context, current events, blunt review · $2/$6 per 1M
+ 5. Auto          Cheapest model that fits, picked per task
+ 6. Haiku         Quick answers and light tool use · plan quota
+ 7. DeepSeek Flash    Bulk mechanical edits, cheapest here · $0.05/$0.16 per 1M
+ 8. Google Gemini Pro Long documents and huge codebases · $2/$12 per 1M
+ 9. Kimi K3       Frontend — React, CSS, layout · $3/$15 per 1M
+10. DeepSeek Pro  Maths and algorithms at mid price · $1.6/$3.2 per 1M
 ```
 
-Nine rows, no overflow, every variant directly selectable. Edit `claude_rows` and `apply_models`
-in `models.json` to change the lineup; anything omitted is still routable by Auto. The previous
+Ten rows, no overflow, every row directly selectable, ordered by how often it is picked by
+hand rather than by provider. Edit `picker_lineup` in `models.json` to change it; anything
+omitted is still routable by Auto.
+
+The lineup also owns the **description column**. Left to itself Claude Code prints
+`From gateway` next to every gateway row — true and useless, since it says nothing about when
+to pick that row. A lineup entry that is just `{"model": "..."}` fills itself in from the
+catalog as `<blurb> · <price>`; Claude ids are not catalog entries, so give those a `label`
+and `description` inline. The previous
 settings are copied to `settings.json.bak` first.
 
 `replaceBuiltInOptions` hides gateway-discovered rows, so with a lineup applied the `sync` cache
@@ -320,6 +545,12 @@ Requires Python 3.9+ and an [OpenRouter](https://openrouter.ai) key.
 ```sh
 git clone https://github.com/lionel509/Switchboard.git ~/.local/share/claude-router
 printf '%s' 'sk-or-v1-…' > ~/.config/openrouter-key && chmod 600 ~/.config/openrouter-key
+
+# put the CLI on PATH, so it is `switchboard …` rather than a path
+install -m 755 /dev/stdin ~/.local/bin/switchboard <<'SH'
+#!/bin/sh
+exec python3 "$HOME/.local/share/claude-router/switchboard.py" "$@"
+SH
 ```
 
 Add to `~/.zshrc`:

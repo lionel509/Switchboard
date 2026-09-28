@@ -10,3 +10,6 @@ router.log
 __pycache__/
 *.py[cod]
 .DS_Store
+
+# Runtime plan-quota files — written by the router (kimi) and the statusline (claude)
+*-limits.json

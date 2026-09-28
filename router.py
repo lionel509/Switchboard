@@ -1,18 +1,29 @@
 #!/usr/bin/env python3
 """Route Claude Code requests by model name, so /model switches providers.
 
-  model has no "/"  ->  api.anthropic.com, forwarding whatever credential the
-                        client sent, untouched. Your claude.ai subscription.
-  model has a "/"   ->  openrouter.ai (e.g. x-ai/grok-4.6), using the key in
-                        ~/.config/openrouter-key.
+  model has no "/"    ->  api.anthropic.com, forwarding whatever credential the
+                          client sent, untouched. Your claude.ai subscription.
+  vendor in providers ->  that vendor's own Anthropic-compatible endpoint, on its
+                          own key. For outside *subscriptions* — Kimi For Coding
+                          and friends: flat monthly fee, no cash per token.
+  model has a "/"     ->  openrouter.ai (e.g. x-ai/grok-4.6), using the key in
+                          ~/.config/openrouter-key. Metered per token.
 
-Nothing is stored. The subscription token is forwarded, never read or written.
+Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
+and is stripped on both third-party paths — it never leaves this machine toward
+OpenRouter or a vendor endpoint.
 """
-import hashlib, http.client, json, os, sys, threading, time
+import base64, hashlib, http.client, json, os, re, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
 KEYFILE  = os.path.expanduser("~/.config/openrouter-key")
+# A second OpenRouter key whose workspace has no zero-data-retention guardrail.
+# Only models flagged zdr:false are sent with it -- see or_key().
+NONZDR_KEYFILE = os.path.expanduser("~/.config/openrouter-key-nonzdr")
+# /gemma/or only: its own key with a $2/day OpenRouter credit limit. No fallback
+# to KEYFILE -- falling back would bypass the cap the key exists for.
+GEMMA_KEYFILE = os.path.expanduser("~/.config/openrouter-key-gemma")
 LOGFILE  = os.path.expanduser(os.environ.get(
     "CLAUDE_ROUTER_LOG", "~/.local/share/claude-router/requests.log"))
 # substrings of OpenRouter model ids to surface in /model
@@ -22,6 +33,17 @@ SURFACE  = [s for s in os.environ.get("CLAUDE_ROUTER_MODELS", "grok").split(",")
 # models.json is the source of truth for what appears in /model and what Auto
 # may choose from. Edit it with switchboard.py. If it is missing we fall back to
 # the old CLAUDE_ROUTER_MODELS substring behaviour so nothing breaks.
+# Gemma 4 Kaggle harness (swegemma) pass-through. The harness speaks OpenAI
+# /v1/chat/completions and always sends the competition model name, so the route
+# is picked by URL path, not model: point MODEL_PROXY_URL at one of
+#   http://127.0.0.1:8787/gemma/local/v1  -> llama-server (Gaming PC, via tunnel)
+#   http://127.0.0.1:8787/gemma/or/v1     -> OpenRouter, strict ZDR key,
+#                                            google/gemma-4-31b-it, $0.09/$0.34 per 1M
+# Competition Data may not leave his hardware (rules 2.4.b), so /local never fails
+# over to anything: if llama-server is down the request errors.
+GEMMA_LOCAL = os.environ.get("CLAUDE_ROUTER_GEMMA_LOCAL", "http://127.0.0.1:8000")
+GEMMA_OR_MODEL = "google/gemma-4-31b-it"
+
 CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")
 
 
@@ -36,6 +58,18 @@ def load_catalog():
 CATALOG      = load_catalog()
 CANDIDATES   = [m for m in CATALOG.get("models", []) if m.get("id")]
 BY_ID        = {m["id"]: m for m in CANDIDATES}
+
+# --- Outside subscriptions -------------------------------------------------
+# A vendor with its own Anthropic-compatible endpoint, billed by its own plan
+# instead of per token. Keyed by the first path segment of the model id, so
+# "kimi/k3" routes here while "moonshotai/kimi-k3" still goes to OpenRouter --
+# the same model, bought two different ways, and they must stay distinguishable.
+#
+# Ids are deliberately split in two. The picker id stays bracket-free, because
+# "[1m]" is Claude Code's own syntax for a context variant and it rewrites ids
+# carrying it; upstream_id is what actually goes on the wire.
+PROVIDERS    = CATALOG.get("providers", {})
+UPSTREAM_ID  = {m["id"]: m["upstream_id"] for m in CANDIDATES if m.get("upstream_id")}
 
 # --- Auto ------------------------------------------------------------------
 # A pseudo-model in the picker. Rather than defaulting to something cheap, Auto
@@ -73,11 +107,35 @@ PORTABLE = {"model", "messages", "system", "max_tokens", "metadata",
             "stop_sequences", "stream", "temperature", "top_k", "top_p",
             "tools", "tool_choice"}
 
-# Reasoning budget handed to OpenRouter models, in output tokens. These are run
-# at their strongest rather than sliding with the effort setting, because on this
-# setup the ←/→ slider is spent selecting the model instead (see ARROW_MODEL).
+# Default reasoning budget for OpenRouter models, in output tokens, used when a
+# request carries no effort level. When it does, the ←/→ slider scales this via
+# EFFORT_BUDGETS below -- the slider adjusts the chosen model's effort rather
+# than swapping models (ARROW_MODEL still does that, for anyone who wants it).
 # Thinking tokens bill as output tokens, so this is a real cost lever.
 THINKING_BUDGET = int(os.environ.get("CLAUDE_ROUTER_THINKING", "12000"))
+
+# Per-level thinking budgets for the ←/→ slider. Without a level the flat
+# THINKING_BUDGET above applies, which is what every request used to get.
+EFFORT_BUDGETS = CATALOG.get("effort_budgets", {})
+# OpenRouter's reasoning.effort only has three stops, so the five map onto them.
+OR_EFFORT = {"low": "low", "medium": "medium", "high": "high",
+             "xhigh": "high", "max": "high"}
+
+
+def strip_cache_control(node):
+    """Remove every cache_control marker, recursively. Anthropic-only."""
+    if isinstance(node, dict):
+        node.pop("cache_control", None)
+        for v in node.values():
+            strip_cache_control(v)
+    elif isinstance(node, list):
+        for v in node:
+            strip_cache_control(v)
+
+
+def effort_of(req):
+    """The ←/→ slider's level, or None. Claude Code sends it as output_config."""
+    return (req.get("output_config") or {}).get("effort")
 
 
 def sanitize(body):
@@ -87,19 +145,13 @@ def sanitize(body):
     except Exception:
         return body
     model = req.get("model", "")
+    # Read the slider BEFORE trimming: output_config is Anthropic-only, so the
+    # allowlist below drops it, and the level has to survive as a thinking budget.
+    effort = effort_of(req)
     req = {k: v for k, v in req.items() if k in PORTABLE}
     req["provider"] = prefs_for(model)
 
-    def strip_cc(node):
-        if isinstance(node, dict):
-            node.pop("cache_control", None)
-            for v in node.values():
-                strip_cc(v)
-        elif isinstance(node, list):
-            for v in node:
-                strip_cc(v)
-
-    strip_cc(req)
+    strip_cache_control(req)
 
     # Restore reasoning. `thinking` is dropped above as an Anthropic-only field,
     # but OpenRouter honours exactly that one — measured on deepseek-v4-pro:
@@ -107,10 +159,23 @@ def sanitize(body):
     # also gives 0 (silently ignored), and an explicit budget gives 222. So
     # without this these models run with NO reasoning whatsoever.
     # Anthropic requires 1024 <= budget_tokens < max_tokens.
+    #
+    # The slider chooses how much of that budget to spend. Without it every
+    # model ran at a flat THINKING_BUDGET regardless of where the dial sat,
+    # which is what made ←/→ look broken on a gateway row.
     mt = req.get("max_tokens") or 0
-    budget = min(THINKING_BUDGET, mt - 1024)
+    want = EFFORT_BUDGETS.get(effort, THINKING_BUDGET) if effort else THINKING_BUDGET
+    budget = min(want, mt - 1024)
     if budget >= 1024:
         req["thinking"] = {"type": "enabled", "budget_tokens": budget}
+        if effort:
+            # OpenRouter's own documented lever, accepted alongside the Anthropic
+            # one; whichever the upstream honours wins.
+            req["reasoning"] = {"effort": OR_EFFORT.get(effort, "medium")}
+    else:
+        # Anthropic rejects a budget under 1024, so the honest encoding of "no
+        # room to think" is off, not an invalid budget.
+        req["thinking"] = {"type": "disabled"}
     return json.dumps(req).encode()
 
 
@@ -119,6 +184,9 @@ def sanitize(body):
 # providers; sort="throughput" picks the fastest of those.
 PROVIDER_PREFS = {
     "gemini": {"zdr": True, "order": ["google-vertex/global"]},
+    # Bulk audit worker: cheapest ZDR provider, not fastest. Floor $0.045/$0.14
+    # (inference.net) if it qualifies; the ZDR pack lists at $0.15/$0.50.
+    "glm-5.3-flash": {"zdr": True, "sort": "price"},
 }
 DEFAULT_PREFS = {"zdr": True, "sort": "throughput"}
 
@@ -340,20 +408,26 @@ def ask_router_model(task, cands=None):
     return None
 
 
-def resolve_auto(req):
-    """Map the auto pseudo-model onto a real one. One-way: never downgrades."""
+def resolve_auto(req, pol=None):
+    """Map the auto pseudo-model onto a real one. One-way: never downgrades.
+
+    The folder's data policy narrows what Auto may choose from rather than
+    refusing its pick afterwards. Auto exists to land on something workable, so
+    a policy that rules a model out should steer the choice, not 403 the turn.
+    """
     key = conv_key(req)
     with _auto_lock:
         pinned = _auto_pins.get(key)
     if pinned == FALLBACK:
         return FALLBACK                  # escalation is permanent for this conversation
-    if pinned:
+    if pinned and allowed(pinned, pol or {}):
         chosen = FALLBACK if looks_hard(req) else pinned
     elif looks_hard(req):
         chosen = FALLBACK                # already real work; nothing to decide
     else:
         # First turn: spend one cheap call working out what this task needs.
-        chosen = ask_router_model(task_text(req)) or FALLBACK
+        cands = [m for m in CANDIDATES if allowed(m["id"], pol or {})]
+        chosen = ask_router_model(task_text(req), cands) or FALLBACK
     with _auto_lock:
         _auto_pins[key] = chosen
         if len(_auto_pins) > 512:        # bounded; oldest insertions drop first
@@ -388,17 +462,24 @@ def family_of(fam):
                   key=lambda m: (m.get("price") or [0])[0])
 
 
-def resolve_family(req, fam):
+def resolve_family(req, fam, tier=None, pol=None):
     """One picker row per family; the tier is chosen per task.
 
     Claude Code's picker cannot put variants behind a row — the arrow-key adjust
     on the effort line is its own UI, not something a gateway entry can hook. So
     a family row resolves its own tier the way Auto does, restricted to that
     family, and the list stays one row per family instead of one per variant.
+
+    A folder that names a tier settles it outright: no router call, no latency,
+    and the answer is the same every turn. Default is pro, set per folder.
     """
-    cands = family_of(fam)
+    cands = [m for m in family_of(fam) if allowed(m["id"], pol or {})]
     if not cands:
         return FALLBACK
+    if tier:
+        want = [m for m in cands if m.get("tier") == tier]
+        if want:
+            return want[0]["id"]
     key = conv_key(req) + ":" + fam
     with _auto_lock:
         pinned = _auto_pins.get(key)
@@ -410,7 +491,7 @@ def resolve_family(req, fam):
     return chosen
 
 
-def resolve_arrow(req):
+def resolve_arrow(req, pol=None):
     """Map the picker's effort level onto a model. This is the arrow-key row.
 
     No conversation pin: the whole point is that ←/→ switches the model mid
@@ -418,14 +499,41 @@ def resolve_arrow(req):
     """
     eff = (req.get("output_config") or {}).get("effort")
     chosen = ARROW_MAP.get(eff)
-    if chosen:
+    if chosen and allowed(chosen, pol or {}):
         return chosen
-    # Effort absent or unmapped: fall to the highest level that is configured,
-    # since the shortlist is ordered weakest-to-strongest.
+    # Effort absent, unmapped, or ruled out by the folder: fall to the highest
+    # level that is configured AND permitted here. The shortlist is ordered
+    # weakest-to-strongest, so this keeps as much of the arrow's intent as the
+    # policy allows instead of dropping straight to the fallback.
     for lvl in reversed(ARROW_ORDER):
-        if ARROW_MAP.get(lvl):
-            return ARROW_MAP[lvl]
+        cand = ARROW_MAP.get(lvl)
+        if cand and allowed(cand, pol or {}):
+            return cand
     return FALLBACK
+
+
+def picker_id(mid, entries=()):
+    """The id Claude Code sees: bare, or carrying its own "[1m]" context variant.
+
+    Claude Code does not know these ids, so it assumes a window for them --
+    measured on 2.1.280 (2026-09-23): an unrecognized id gets
+    CLAUDE_CODE_MAX_CONTEXT_TOKENS (256,000 here), not the window this catalog
+    records, so a 1M model compacts at 256k. "[1m]" is the binary's own lever
+    ("append [1m] to the model name for 1M"): it sets the window to 1,000,000,
+    and it is stripped before the wire -- measured: "~fam/mimo[1m]" arrives as
+    "~fam/mimo", "kimi/k3[1m]" as "kimi/k3". So the suffix lives only in what
+    the picker publishes and never in models.json ids or upstream_id.
+
+    A row takes its smallest member's window (flash must not inherit pro's),
+    and Auto stays bare on purpose: it pins to a delegate of unknown size,
+    haiku included, and a 1M window would let a 200k delegate be overpacked.
+    """
+    if mid == AUTO_MODEL:
+        return mid
+    windows = [m.get("context") or 0 for m in entries if m]
+    if windows and min(windows) >= 1_000_000:
+        return mid + "[1m]"
+    return mid
 
 
 def picker_rows():
@@ -450,7 +558,7 @@ def picker_rows():
                 seen.add(t)
                 order.append(t)
         tiers = "/".join(order)
-        rows.append({"id": FAMILY_PREFIX + fam,
+        rows.append({"id": picker_id(FAMILY_PREFIX + fam, members),
                      "display_name": "%s (%s)" % (label, tiers)})
     for mid in PICKER.get("models", []):
         m = BY_ID.get(mid)
@@ -459,21 +567,396 @@ def picker_rows():
         label = m.get("name") or mid
         if m.get("zdr", True) is False:
             label += " (no ZDR)"
-        rows.append({"id": mid, "display_name": label})
+        rows.append({"id": picker_id(mid, [m]), "display_name": label})
     return rows
 
 
-def or_key():
+def read_key(path):
+    """A credential from a file, or None. Never logged, never cached."""
     try:
-        with open(KEYFILE) as f:
+        with open(os.path.expanduser(path)) as f:
             return f.read().strip()
     except OSError:
         return None
 
 
+def or_key(model=None):
+    """The OpenRouter credential, picked by whether the model needs a non-ZDR route.
+
+    An OpenRouter *workspace* carries the zero-data-retention guardrail, and a key
+    belongs to a workspace — so which key is sent decides whether a non-ZDR
+    provider is reachable at all. Keeping the permissive key on its own file means
+    the strict key stays the default: a model has to be flagged zdr:false in the
+    catalog to reach the permissive workspace, and the folder policy has already
+    decided whether such a model may run here at all.
+
+    Falls back to the strict key when no permissive one is installed, so the only
+    cost of not having it is the guardrail refusal you would have had anyway.
+
+    A model naming an "upstream" is sent with that upstreams row's key_file and
+    nothing else: a missing row or file is None, never the main key, because a
+    per-model key usually exists to cap what that model can spend.
+    """
+    if model:
+        m = BY_ID.get(model) or {}
+        if "upstream" in m:
+            upstream_name = m["upstream"]
+            upstream = next((u for u in CATALOG.get("upstreams", []) if u.get("name") == upstream_name), None)
+            if upstream and "key_file" in upstream:
+                return read_key(upstream["key_file"])
+            return None
+
+        if m.get("zdr", True) is False:
+            return read_key(NONZDR_KEYFILE) or read_key(KEYFILE)
+    return read_key(KEYFILE)
+
+
+# --- credential renewal -------------------------------------------------
+# The router still does not speak OAuth. It asks switchboard -- which owns the
+# flow -- to mint a new access token, then re-reads the key file exactly as
+# before. Without this a vendor token dying mid-run surfaces as a 401 the client
+# can only retry into, which is what it was doing: an agent would work for
+# fifteen minutes and then stop, signed out, with every retry equally dead.
+
+RENEW_MARGIN = 300          # renew a token with less than this much life left
+_renew_locks = {}
+_locks_guard = threading.Lock()
+
+
+def _renew_lock(vendor):
+    with _locks_guard:
+        return _renew_locks.setdefault(vendor, threading.Lock())
+
+
+def expiring(key, margin=RENEW_MARGIN):
+    """True if `key` is a JWT that is spent, or nearly.
+
+    Only the payload is read, and only its `exp`. A credential that is not a JWT
+    has no expiry to inspect -- those are left to the 401 path, which catches the
+    same failure a few hundred milliseconds later.
+    """
+    try:
+        parts = key.split(".")
+        if len(parts) < 3 or not key.startswith("ey"):
+            return False
+        pad = parts[1] + "=" * (-len(parts[1]) % 4)
+        exp = json.loads(base64.urlsafe_b64decode(pad)).get("exp")
+        if exp is None:
+            return False
+        exp = float(exp)
+        if exp > 1e11:                     # milliseconds
+            exp /= 1000.0
+        return exp - time.time() < margin
+    except Exception:
+        return False                       # unreadable is not expired
+
+
+def renew_key(vendor, prov, stale):
+    """A fresh access token for `vendor`, or None. Serialised per provider.
+
+    The lock matters more than it looks. A refresh token is rotated on use, so
+    two renewals racing means the second invalidates the first and both sessions
+    are signed out -- exactly what a fan-out of parallel subagents would cause.
+    Whoever waits re-reads the file first: if the key changed underneath, another
+    thread already renewed and that token is used instead of burning a second.
+    """
+    if not prov.get("oauth"):
+        return None                        # a static key cannot be renewed
+    with _renew_lock(vendor):
+        current = read_key(prov.get("key_file", ""))
+        if current and current != stale:
+            return current
+        try:
+            here = os.path.dirname(os.path.abspath(__file__))
+            if here not in sys.path:
+                sys.path.insert(0, here)
+            from switchboard import oauth_refresh, save_oauth
+        except Exception as e:
+            sys.stderr.write("renew %s: switchboard unavailable (%s)\n" % (vendor, e))
+            return None
+        try:
+            tok = oauth_refresh(vendor, prov)
+            if not tok:
+                return None                # reason already on stderr
+            save_oauth(vendor, prov, tok)
+        except Exception as e:
+            sys.stderr.write("renew %s: %s\n" % (vendor, e))
+            return None
+        sys.stderr.write("renewed %s access token\n" % vendor)
+        return tok.get("access_token")
+
+
+# --- Subscription quota ------------------------------------------------------
+# A provider can declare "quota": {"path": ..., "interval": ...}. After serving
+# (or being refused by) that vendor, the router polls the endpoint with the
+# provider's own credential and rewrites <logdir>/<vendor>-limits.json beside
+# requests.log. That is how the notch shows plan quota while holding no keys of
+# its own: same folder as the log, so the one folder grant already covers it.
+_quota_last = {}                    # vendor -> monotonic time of last attempt
+_quota_lock = threading.Lock()
+
+
+def quota_file(vendor):
+    return os.path.join(os.path.dirname(LOGFILE), "%s-limits.json" % vendor)
+
+
+def flatten_quota(payload):
+    """Normalise a quota payload to the limits-file shape. None on an unknown
+    shape, and the old file is left standing -- a stale meter beats a vanished
+    one.
+
+    Kimi (/coding/v1/usages) answers:
+
+      {"limits": [{"window": {"duration": 300, ...}, "detail": {...}}],
+       "usages": {"limit_5h":         {"used_ratio": 0.231, "reset_time": "..."},
+                  "limit_month_total": {...},
+                  "limit_month_code":  {...}}}
+
+    Ratios become percents; reset times stay ISO strings. `month_code` is kept
+    on record although the panel displays `month_total` -- they count different
+    pools against different denominators, and the total is the one nearer its
+    ceiling today, so it is the one that would actually run out first.
+    """
+    usages = payload.get("usages") or {}
+    five = usages.get("limit_5h") or {}
+    if five.get("used_ratio") is None:
+        return None
+    month = usages.get("limit_month_total") or {}
+    month_code = usages.get("limit_month_code") or {}
+    out = {"five_hour_pct": round(float(five["used_ratio"]) * 100, 1),
+           "five_hour_resets_at": five.get("reset_time"),
+           "month_pct": round(float(month.get("used_ratio") or 0) * 100, 1),
+           "month_resets_at": month.get("reset_time")}
+    if month_code.get("used_ratio") is not None:
+        out["month_code_pct"] = round(float(month_code["used_ratio"]) * 100, 1)
+        out["month_code_resets_at"] = month_code.get("reset_time")
+    return out
+
+
+def fetch_quota(vendor, force=False):
+    """Poll one vendor's quota endpoint and rewrite its limits file.
+
+    The number moves on the scale of hours, so the per-vendor throttle is finer
+    than the display needs; setting the timestamp before the fetch also makes it
+    the in-flight guard, so two threads cannot double-poll.
+    """
+    prov = PROVIDERS.get(vendor) or {}
+    quota = prov.get("quota") or {}
+    path = quota.get("path")
+    if not path:
+        return
+    interval = int(quota.get("interval", 60))
+    with _quota_lock:
+        now = time.monotonic()
+        if not force and now - _quota_last.get(vendor, 0) < interval:
+            return
+        _quota_last[vendor] = now
+    key = read_key(prov.get("key_file", ""))
+    if not key:
+        return
+    prefix = prov.get("auth_prefix", "")
+    try:
+        conn = http.client.HTTPSConnection(prov["host"], timeout=30)
+        conn.request("GET", path, headers={
+            prov.get("auth_header", "x-api-key"):
+                (prefix + " " + key) if prefix else key})
+        resp = conn.getresponse()
+        raw = resp.read()
+        conn.close()
+        if resp.status != 200:
+            return
+        flat = flatten_quota(json.loads(raw))
+    except Exception:
+        return
+    if flat is None:
+        return
+    flat["ts"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    tmp = quota_file(vendor) + ".tmp"
+    try:
+        with open(tmp, "w") as f:
+            f.write(json.dumps(flat) + "\n")
+        os.replace(tmp, quota_file(vendor))
+    except OSError:
+        pass
+
+
+def maybe_fetch_quota(upstream):
+    """Poll the plan's usage meters after touching that plan.
+
+    Quota only ever changes by using the plan, so the moments that can move the
+    number are exactly the requests routed there -- including a 429, which is
+    the one everyone then watches the meter for. Off the response path in a
+    daemon thread, so it costs the stream nothing.
+    """
+    if upstream in PROVIDERS and (PROVIDERS[upstream].get("quota") or {}).get("path"):
+        threading.Thread(target=fetch_quota, args=(upstream,), daemon=True).start()
+
+
+def sanitize_native(body, prov, wire_model):
+    """Rewrite a request for a vendor's own Anthropic-compatible endpoint.
+
+    Deliberately not sanitize(). That one is built for OpenRouter and injects a
+    `provider` preference block, which is OpenRouter's own extension and a 400
+    anywhere else. Here the endpoint speaks the Messages API by definition, so
+    the body is left intact apart from the model name and whatever fields the
+    vendor is declared not to understand.
+
+    cache_control is kept by default. These are subscription endpoints, so the
+    win is latency and rate-limit headroom rather than cash; set
+    "cache_control": false on the provider if one starts rejecting the markers.
+    """
+    try:
+        req = json.loads(body)
+    except Exception:
+        return body
+    if wire_model:
+        req["model"] = wire_model
+    for field in prov.get("drop_fields", []):
+        req.pop(field, None)
+    if not prov.get("cache_control", True):
+        strip_cache_control(req)
+    return json.dumps(req).encode()
+
+
+# Statuses that mean "this route is out of capacity", not "this request is wrong".
+# 429 rate limit / quota, 402 payment required, 529 overloaded. A 401/403 is a
+# credential problem and must NOT silently drain a different quota instead.
+FAILOVER_STATUSES = frozenset((402, 429, 529))
+
+
+def metered(model):
+    """True unless the catalog bills this model to a plan. Unknown ids count as
+    metered -- the safe guess when the question is whether a retry costs cash."""
+    return (BY_ID.get(model) or {}).get("billing") != "subscription"
+
+
+# --- turn caps ------------------------------------------------------------
+# Requests per rolling hour on metered models (models.json `turn_caps`). The
+# router never sees an agent session, so the cap is per model: a looping agent
+# hits it within the hour instead of spending all night.
+TURNS = {}
+TURNS_LOCK = threading.Lock()
+
+
+def turn_cap(model):
+    caps = CATALOG.get("turn_caps") or {}
+    if model == "gemma-or":
+        return caps.get("gemma_or_per_hour")
+    if not metered(model):
+        return None
+    price = ((BY_ID.get(model) or {}).get("price") or [-1])[0]
+    for ceiling, cap in caps.get("per_hour") or []:
+        if ceiling is None or 0 <= price < ceiling:
+            return cap
+    return None
+
+
+def take_turn(model):
+    """Count one request against `model`'s cap. False (nothing counted) if full."""
+    cap = turn_cap(model)
+    if cap is None:
+        return True
+    now = time.time()
+    with TURNS_LOCK:
+        q = [t for t in TURNS.get(model, []) if now - t < 3600]
+        if len(q) >= cap:
+            TURNS[model] = q
+            return False
+        TURNS[model] = q + [now]
+        return True
+
+
+def failover_chain(model):
+    """Models to try after `model` runs out of capacity, best-first.
+
+    Per-model `failover` wins; otherwise the catalog-wide `failover_default`.
+    Self-references and duplicates are dropped so a bad config cannot loop.
+    """
+    entry = BY_ID.get(model) or {}
+    chain = entry.get("failover")
+    if chain is None:
+        chain = CATALOG.get("failover_default") or []
+    if isinstance(chain, str):
+        chain = [chain]
+    seen, out = {model}, []
+    for m in chain:
+        if m and m not in seen and m in BY_ID:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
 def upstream_for(model):
-    """Provider-qualified slugs (with a /) go to OpenRouter; bare ids to Anthropic."""
+    """Vendor prefix first, then the generic slash rule.
+
+    "kimi/k3"            -> direct:kimi   its own plan, its own endpoint
+    "moonshotai/kimi-k3" -> openrouter    same model, metered per token
+    "claude-opus-5"      -> anthropic
+    """
+    vendor = (model or "").split("/")[0]
+    if vendor in PROVIDERS:
+        return "direct:" + vendor
     return "openrouter" if "/" in (model or "") else "anthropic"
+
+
+# --- Per-folder data policy -------------------------------------------------
+# Which models a folder is allowed to talk to. Claude Code states its working
+# directory in the Environment block it sends with every request, so the folder
+# is knowable at the wire without the client cooperating.
+POLICY         = CATALOG.get("folder_policy", {})
+POLICY_DEFAULT = {"data": "any", "tier": "pro"}
+CWD_RE = re.compile(r"Primary working directory:\s*([^\r\n\"\\]+)")
+
+
+def cwd_of(body):
+    """The session's working directory, or "" if the request never said."""
+    if not body:
+        return ""
+    m = CWD_RE.search(body.decode("utf-8", "replace"))
+    return m.group(1).strip().rstrip("/") if m else ""
+
+
+def policy_for(cwd):
+    """Longest-prefix folder policy, so a subfolder inherits its vault's rule.
+
+    ponytail: no cwd -> the default. A bare API client sends no Environment
+    block, and failing closed on an unknown cwd would break every non-Claude-Code
+    caller. Tighten only if something other than Claude Code starts talking here.
+    """
+    pol = dict(POLICY.get("_default") or POLICY_DEFAULT)
+    best, found = "", None
+    for path, p in POLICY.items():
+        if path.startswith("_") or not isinstance(p, dict):
+            continue
+        root = os.path.expanduser(path).rstrip("/")
+        if (cwd == root or cwd.startswith(root + "/")) and len(root) >= len(best):
+            best, found = root, p
+    if found:
+        pol.update(found)
+    return pol
+
+
+def allowed(model, pol):
+    """Whether a folder's data policy permits this model.
+
+    claude  Anthropic only -- nothing leaves the plan.
+    zdr     plus OpenRouter routes that have a zero-data-retention provider. A
+            vendor subscription is excluded unless its provider declares
+            "zdr": true, because a plan retains under the vendor's own terms and
+            an undeclared one must not be assumed private.
+    any     no restriction.
+    """
+    data = (pol.get("data") or "any").lower()
+    if data == "any":
+        return True
+    up = upstream_for(model)
+    if up == "anthropic":
+        return True
+    if data == "claude":
+        return False
+    if up.startswith("direct:"):
+        return PROVIDERS.get(up.split(":", 1)[1], {}).get("zdr") is True
+    return (BY_ID.get(model) or {}).get("zdr", True) is not False
 
 
 class Router(BaseHTTPRequestHandler):
@@ -489,6 +972,8 @@ class Router(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
+        if self.path.startswith("/gemma/"):
+            return self.gemma()
         self.route()
 
     def do_GET(self):
@@ -501,6 +986,7 @@ class Router(BaseHTTPRequestHandler):
         n = int(self.headers.get("content-length") or 0)
         body = self.rfile.read(n) if n else b""
 
+        pol = policy_for(cwd_of(body))
         model = requested = ""
         if body:
             try:
@@ -510,20 +996,83 @@ class Router(BaseHTTPRequestHandler):
             if req is not None:
                 model = requested = req.get("model", "") or ""
                 if requested == AUTO_MODEL:
-                    model = resolve_auto(req)
+                    model = resolve_auto(req, pol)
                 elif requested == ARROW_MODEL:
-                    model = resolve_arrow(req)
+                    model = resolve_arrow(req, pol)
                 elif requested.startswith(FAMILY_PREFIX):
-                    model = resolve_family(req, requested[len(FAMILY_PREFIX):])
+                    model = resolve_family(req, requested[len(FAMILY_PREFIX):],
+                                           pol.get("tier"), pol)
                 if model != requested:
                     req["model"] = model
                     body = json.dumps(req).encode()
 
+        # The data policy filters the whole chain, so failover cannot route around
+        # it. A hand-picked model that the folder forbids is refused rather than
+        # silently swapped -- a swap looks like the pick worked.
+        attempts = [m for m in [model] + failover_chain(model) if allowed(m, pol)]
+        if not attempts:
+            return self.fail(403,
+                "%s is set to data policy %r, which does not permit %s. "
+                "Pick a Claude model, or change the folder's policy: "
+                "switchboard.py policy <folder> --data any"
+                % (cwd_of(body) or "this folder", pol.get("data", "any"),
+                   model or "that model"))
+        prepared, errors = [], []
+        for cand in attempts:
+            got = self.prepare(cand, body)
+            if isinstance(got, str):
+                errors.append("%s: %s" % (cand, got))
+            else:
+                prepared.append(got)
+        if not prepared:
+            return self.fail(500, "; ".join(errors) or "no usable upstream")
+
+        self.relay("POST" if body else self.command, prepared,
+                   requested=requested)
+
+    def prepare(self, model, body):
+        """Everything needed to issue one attempt, or a string explaining why not.
+
+        Split out of route() so a failover attempt is built the same way as the
+        first one -- each target needs its own credential, path, body sanitising
+        and model name on the wire, and reusing the previous target's would send
+        one vendor's request to another.
+        """
         target = upstream_for(model)
-        if target == "openrouter":
-            key = or_key()
+        vendor = key = None
+        if body:
+            try:
+                req = json.loads(body)
+                req["model"] = model
+                body = json.dumps(req).encode()
+            except Exception:
+                pass
+        if target.startswith("direct:"):
+            vendor = target.split(":", 1)[1]
+            prov = PROVIDERS[vendor]
+            keyfile = prov.get("key_file", "")
+            key = read_key(keyfile)
+            if key and expiring(key):
+                key = renew_key(vendor, prov, key) or key
             if not key:
-                return self.fail(500, "no OpenRouter key at ~/.config/openrouter-key")
+                return "no %s key at %s" % (vendor, keyfile or "<unset>")
+            host = prov["host"]
+            path = prov.get("path_prefix", "").rstrip("/") + self.path
+            headers = self.headers_for_direct(prov, key)
+            wire = UPSTREAM_ID.get(model) or model.split("/", 1)[-1]
+            body = sanitize_native(body, prov, wire)
+            limit = (BY_ID.get(model) or {}).get("context")
+            approx = len(body) // 4                    # ~4 chars per token
+            if limit and approx > limit:
+                return ("this conversation is ~%s tokens and %s holds %s"
+                        % ("{:,}".format(approx), model, "{:,}".format(limit)))
+            target = vendor            # log each subscription as its own pool
+        elif target == "openrouter":
+            key = or_key(model)
+            if not key:
+                up = (BY_ID.get(model) or {}).get("upstream")
+                return ("no key for upstream %r -- check its key_file" % up if up
+                        else "no OpenRouter key at ~/.config/openrouter-key")
             host, path = "openrouter.ai", "/api" + self.path
             headers = self.headers_for_openrouter(key)
             body = sanitize(body)
@@ -531,14 +1080,18 @@ class Router(BaseHTTPRequestHandler):
             host, path = "api.anthropic.com", self.path
             headers = self.headers_passthrough()
         if body:
-            # The body may have been rewritten (auto) or trimmed (sanitize), so
-            # the client's Content-Length can no longer be trusted on either path.
             for k in [k for k in headers if k.lower() == "content-length"]:
                 del headers[k]
             headers["Content-Length"] = str(len(body))
-
-        self.relay("POST" if body else self.command, host, path, headers, body,
-                   model=model, upstream=target, requested=requested)
+        return {"model": model, "upstream": target, "host": host, "path": path,
+                "headers": headers, "body": body, "vendor": vendor, "key": key,
+                # Audit: a privacy rail is only trustworthy if you can ask later
+                # what actually went to the permissive workspace.
+                "nonzdr": target == "openrouter" and
+                          not (BY_ID.get(model) or {}).get("upstream") and
+                          (BY_ID.get(model) or {}).get("zdr", True) is False,
+                "key_upstream": target == "openrouter" and
+                                (BY_ID.get(model) or {}).get("upstream")}
 
     def headers_passthrough(self):
         """Everything the client sent, minus hop-by-hop. Credential untouched."""
@@ -554,21 +1107,119 @@ class Router(BaseHTTPRequestHandler):
         h["Authorization"] = "Bearer " + key
         return h
 
-    def relay(self, method, host, path, headers, body, model="", upstream="",
-              requested=""):
-        t0 = time.time()
-        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": upstream,
-               "model_requested": model}
-        if requested and requested != model:
-            rec["auto_from"] = requested        # picker said auto; we chose model
-        try:
-            conn = http.client.HTTPSConnection(host, timeout=900)
-            conn.request(method, path, body=body, headers=headers)
+    def headers_for_direct(self, prov, key):
+        """The vendor's own credential, and never yours.
+
+        Same contract as headers_for_openrouter: the claude.ai OAuth token and
+        any Anthropic API key are removed before the request leaves the machine.
+        anthropic-beta goes with them -- a compatible endpoint implements the
+        Messages API, not Anthropic's beta flags, and an unknown one is a 400.
+        """
+        h = self.headers_passthrough()
+        for k in list(h):
+            if k.lower() in ("authorization", "x-api-key", "anthropic-beta"):
+                del h[k]
+        prefix = prov.get("auth_prefix", "")
+        h[prov.get("auth_header", "x-api-key")] = (
+            prefix + " " + key if prefix else key)
+        if not any(k.lower() == "anthropic-version" for k in h):
+            h["anthropic-version"] = "2023-06-01"
+        return h
+
+    def issue(self, method, att, rec):
+        """One attempt, renewing a dead vendor credential once before giving up.
+
+        A 401 is not a failover case: the model has capacity and the request is
+        fine, the token has simply expired. Failing over would answer from a
+        different model, and returning it makes the client retry a credential
+        that cannot recover -- so it is retried here, on the same upstream, with
+        a fresh token. Safe for the same reason failover is: nothing has been
+        written to the client yet, so the first attempt can be abandoned
+        silently. Only the vendor paths renew; the Anthropic path forwards the
+        client's own credential and is not the router's to refresh.
+        """
+        for renewed in (False, True):
+            conn = http.client.HTTPSConnection(att["host"], timeout=900)
+            conn.request(method, att["path"], body=att["body"],
+                         headers=att["headers"])
             resp = conn.getresponse()
-        except Exception as e:
-            rec.update(status=502, error=str(e), ms=int((time.time() - t0) * 1000))
-            log_request(rec)
-            return self.fail(502, "upstream %s: %s" % (host, e))
+            if resp.status != 401 or renewed or not att.get("vendor"):
+                return conn, resp
+            prov = PROVIDERS.get(att["vendor"]) or {}
+            fresh = renew_key(att["vendor"], prov, att.get("key"))
+            if not fresh:
+                return conn, resp          # nothing better to answer with
+            prefix = prov.get("auth_prefix", "")
+            att["headers"][prov.get("auth_header", "x-api-key")] = (
+                prefix + " " + fresh if prefix else fresh)
+            att["key"] = fresh
+            rec["renewed"] = att["vendor"]
+            try:
+                resp.read()                # drain before reusing the socket
+                conn.close()
+            except Exception:
+                pass
+        return conn, resp
+
+
+    def relay(self, method, prepared, requested=""):
+        """Issue attempts in order until one has capacity, then stream it.
+
+        The decision is safe to make here because nothing has been written to the
+        client yet -- the status line is known before the first byte goes out, so
+        a 429 on the first choice can be abandoned silently. Once streaming
+        starts there is no going back, which is why failover is status-based and
+        never mid-stream. A transport error only fails over to a plan-billed model.
+        """
+        t0 = time.time()
+        resp = conn = None
+        att = prepared[0]
+        for i, att in enumerate(prepared):
+            last = (i == len(prepared) - 1)
+            rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                   "upstream": att["upstream"], "model_requested": att["model"]}
+            if att.get("nonzdr"):
+                rec["nonzdr"] = True
+            if att.get("key_upstream"):
+                rec["key"] = att["key_upstream"]
+            if requested and requested != att["model"]:
+                rec["auto_from"] = requested
+            if i:
+                rec["failover_from"] = prepared[i - 1]["model"]
+            if not take_turn(att["model"]):
+                rec.update(status=429, error="turn cap: %s/h" % turn_cap(att["model"]))
+                log_request(rec)
+                if last:
+                    return self.fail(429, "%s hit its Switchboard turn cap (%s requests/hour, "
+                                     "models.json turn_caps). Wait, or pick a plan model."
+                                     % (att["model"], turn_cap(att["model"])))
+                continue
+            try:
+                conn, resp = self.issue(method, att, rec)
+            except Exception as e:
+                rec.update(status=502, error=str(e), ms=int((time.time() - t0) * 1000))
+                log_request(rec)
+                # A dropped connection is not a capacity signal, so it may move on
+                # to a plan-billed route but never buy the same turn again per token.
+                # This branch used to continue unconditionally: $3.11 on 2026-09-16.
+                if last or metered(prepared[i + 1]["model"]):
+                    return self.fail(502, "upstream %s: %s" % (att["host"], e))
+                continue
+            if resp.status in FAILOVER_STATUSES and not last:
+                rec.update(status=resp.status, failed_over_to=prepared[i + 1]["model"],
+                           ms=int((time.time() - t0) * 1000))
+                log_request(rec)
+                maybe_fetch_quota(att["upstream"])
+                try:
+                    resp.read()          # drain so the socket can be closed cleanly
+                    conn.close()
+                except Exception:
+                    pass
+                continue
+            break
+        if resp is None:                      # every attempt raised
+            return self.fail(502, "no upstream answered")
+        host, model, upstream = att["host"], att["model"], att["upstream"]
 
         streaming = resp.getheader("content-length") is None
         rec["status"], rec["stream"] = resp.status, streaming
@@ -619,6 +1270,7 @@ class Router(BaseHTTPRequestHandler):
         if usage.get("cost") is not None:
             rec["cost"] = usage["cost"]
         log_request(rec)
+        maybe_fetch_quota(upstream)
 
         self.log_message("%s %s -> %s %s (%dms%s)", rec["status"], model or path,
                          provider or host, used or "", rec["ms"],
@@ -671,6 +1323,75 @@ class Router(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
+    def gemma(self):
+        """Relay one harness request to /local or /or, verbatim apart from auth
+        and, for /or, the model name. No policy, no failover: the path decides."""
+        n = int(self.headers.get("content-length") or 0)
+        body = self.rfile.read(n) if n else b""
+        route, _, rest = self.path[len("/gemma/"):].partition("/")
+        rest = "/" + rest
+        headers = {"Content-Type": "application/json"}
+        if route == "local":
+            u = urllib.parse.urlsplit(GEMMA_LOCAL)
+            host, tls, path = u.netloc, u.scheme == "https", rest
+            if self.headers.get("authorization"):
+                headers["Authorization"] = self.headers["authorization"]
+        elif route == "or":
+            key = read_key(GEMMA_KEYFILE)
+            if not key:
+                return self.fail(500, "no Gemma OpenRouter key at ~/.config/openrouter-key-gemma")
+            if not take_turn("gemma-or"):
+                return self.fail(429, "/gemma/or hit its turn cap (%s requests/hour)"
+                                 % turn_cap("gemma-or"))
+            try:
+                req = json.loads(body)
+            except Exception:
+                return self.fail(400, "body is not JSON")
+            req["model"] = GEMMA_OR_MODEL
+            req["provider"] = {"zdr": True}
+            body = json.dumps(req).encode()
+            host, tls = "openrouter.ai", True
+            path = "/api" + rest
+            headers["Authorization"] = "Bearer " + key
+        else:
+            return self.fail(404, "gemma route must be /gemma/local/... or /gemma/or/...")
+
+        t0 = time.time()
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": "gemma-" + route,
+               "model_requested": "gemma-4-31b-it-qat-w4a16-ct"}
+        try:
+            conn = (http.client.HTTPSConnection if tls else http.client.HTTPConnection)(
+                host, timeout=900)
+            conn.request("POST", path, body=body, headers=headers)
+            resp = conn.getresponse()
+            data = resp.read()
+        except OSError as e:
+            rec.update(status=502, error=str(e)[:200])
+            log_request(rec)
+            return self.fail(502, "gemma %s upstream unreachable: %s" % (route, e))
+        rec.update(status=resp.status, ms=int((time.time() - t0) * 1000))
+        # Plain JSON, or SSE whose last usage-bearing chunk carries the totals.
+        u = None
+        for chunk in [data] + [l[5:] for l in reversed(data.splitlines())
+                               if l.startswith(b"data:")]:
+            try:
+                u = json.loads(chunk).get("usage")
+            except (ValueError, AttributeError):
+                continue
+            if u:
+                break
+        if u:
+            rec.update(model_used=GEMMA_OR_MODEL if route == "or" else "llama-server",
+                       **{"in": u.get("prompt_tokens"), "out": u.get("completion_tokens")})
+            if u.get("cost") is not None:
+                rec["cost"] = u["cost"]
+        log_request(rec)
+        self.send_response(resp.status)
+        self.send_header("Content-Type", resp.getheader("Content-Type", "application/json"))
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def fail(self, code, msg):
         payload = json.dumps({"type": "error",
                               "error": {"type": "api_error", "message": msg}}).encode()
@@ -683,5 +1404,19 @@ class Router(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     sys.stderr.write("claude-router on 127.0.0.1:%d  (bare ids -> Anthropic, "
-                     "provider/slug -> OpenRouter)\n" % PORT)
+                     "provider/slug -> OpenRouter, subscriptions: %s)\n"
+                     % (PORT, ", ".join(sorted(PROVIDERS)) or "none"))
+    # Say it now rather than at first use: a missing key file is a 500 halfway
+    # through a task, and the picker row gives no hint that it is inert.
+    for _name, _p in sorted(PROVIDERS.items()):
+        if not read_key(_p.get("key_file", "")):
+            sys.stderr.write("  ! %s has no key at %s — its models will fail "
+                             "until that file exists (chmod 600)\n"
+                             % (_name, _p.get("key_file") or "<unset>"))
+        # Get each plan's meters on record now rather than at first traffic --
+        # the file predating the next request is what lets the notch show quota
+        # for a plan nobody has spent today.
+        if (_p.get("quota") or {}).get("path"):
+            threading.Thread(target=fetch_quota, args=(_name, True),
+                             daemon=True).start()
     ThreadingHTTPServer(("127.0.0.1", PORT), Router).serve_forever()
