@@ -13,7 +13,7 @@ Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
 and is stripped on both third-party paths — it never leaves this machine toward
 OpenRouter or a vendor endpoint.
 """
-import base64, hashlib, http.client, json, os, re, sys, threading, time, urllib.parse
+import base64, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -426,7 +426,10 @@ def resolve_auto(req, pol=None):
         chosen = FALLBACK                # already real work; nothing to decide
     else:
         # First turn: spend one cheap call working out what this task needs.
-        cands = [m for m in CANDIDATES if allowed(m["id"], pol or {})]
+        # A provider can opt out of Auto ("auto": false): Kaggle's credit is for a
+        # hand-pick, never for a router model to spend on its own.
+        cands = [m for m in CANDIDATES if allowed(m["id"], pol or {})
+                 and (PROVIDERS.get(m["id"].split("/")[0]) or {}).get("auto", True)]
         chosen = ask_router_model(task_text(req), cands) or FALLBACK
     with _auto_lock:
         _auto_pins[key] = chosen
@@ -686,6 +689,78 @@ def renew_key(vendor, prov, stale):
         return tok.get("access_token")
 
 
+# --- Minted tokens (Kaggle Model Proxy) --------------------------------------
+# A provider with "token_env" gets its credential from an env file that a vendor
+# CLI writes: KEY=VALUE lines carrying the URL, the key and an ISO expiry. Kaggle's
+# `kaggle benchmarks auth` mints one that lasts an hour, so it is re-minted here
+# once it has under RENEW_MARGIN left. The file is 0600 and is replaced whole, never
+# appended to, so a stale key cannot outlive a fresh one further down the file.
+
+def read_env(path):
+    out = {}
+    try:
+        with open(os.path.expanduser(path)) as f:
+            for line in f:
+                k, eq, v = line.strip().partition("=")
+                if eq and not k.startswith("#"):
+                    out[k.strip()] = v.strip().strip('"')
+    except OSError:
+        pass
+    return out
+
+
+def env_expires(env, field):
+    try:
+        t = env.get(field, "").replace("Z", "+00:00")
+        import datetime
+        return datetime.datetime.fromisoformat(t).timestamp()
+    except Exception:
+        return 0.0
+
+
+def minted_token(vendor, prov):
+    """(base_url, key) for a token_env provider, minting a new one if the file
+    is missing or nearly spent. None if minting fails (reason on stderr)."""
+    tok = prov["token_env"]
+    path = os.path.expanduser(tok["file"])
+    for attempt in (False, True):
+        env = read_env(path)
+        url, key = env.get(tok["url_var"]), env.get(tok["key_var"])
+        if url and key and env_expires(env, tok["expiry_var"]) - time.time() > RENEW_MARGIN:
+            return url.rstrip("/"), key
+        if attempt:
+            return None
+        with _renew_lock(vendor):
+            env = read_env(path)                 # another thread may have just minted
+            if env_expires(env, tok["expiry_var"]) - time.time() > RENEW_MARGIN:
+                continue
+            tmp = path + ".minting"
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            cmd = [os.path.expanduser(c).replace("{file}", tmp) for c in tok["mint"]]
+            exe = shutil.which(cmd[0]) or next(
+                (p for p in (os.path.expanduser("~/.local/bin/" + cmd[0]),
+                             "/opt/homebrew/bin/" + cmd[0]) if os.path.exists(p)), cmd[0])
+            try:
+                old = os.umask(0o077)
+                try:
+                    r = subprocess.run([exe] + cmd[1:], capture_output=True, text=True, timeout=120)
+                finally:
+                    os.umask(old)
+                if r.returncode or not os.path.exists(tmp):
+                    sys.stderr.write("mint %s: exit %s %s\n" % (vendor, r.returncode, r.stderr[-300:]))
+                    return None
+                os.chmod(tmp, 0o600)
+                os.replace(tmp, path)
+                sys.stderr.write("minted a %s token\n" % vendor)
+            except Exception as e:
+                sys.stderr.write("mint %s: %s\n" % (vendor, e))
+                return None
+    return None
+
+
 # --- Subscription quota ------------------------------------------------------
 # A provider can declare "quota": {"path": ..., "interval": ...}. After serving
 # (or being refused by) that vendor, the router polls the endpoint with the
@@ -790,6 +865,96 @@ def maybe_fetch_quota(upstream):
     """
     if upstream in PROVIDERS and (PROVIDERS[upstream].get("quota") or {}).get("path"):
         threading.Thread(target=fetch_quota, args=(upstream,), daemon=True).start()
+
+
+# --- Messages <-> chat completions (wire: openai providers) -----------------
+
+def _text(content):
+    if isinstance(content, str):
+        return content
+    return "\n".join(b.get("text", "") for b in content or [] if b.get("type") == "text")
+
+
+def to_chat(req, wire_model):
+    """An Anthropic Messages request as an OpenAI chat request. Thinking blocks are
+    dropped; tool results become role:tool messages ahead of the user's text."""
+    msgs = []
+    if req.get("system"):
+        msgs.append({"role": "system", "content": _text(req["system"])})
+    for m in req.get("messages", []):
+        c = m.get("content")
+        if isinstance(c, str):
+            msgs.append({"role": m["role"], "content": c})
+        elif m["role"] == "assistant":
+            out = {"role": "assistant", "content": _text(c) or None}
+            calls = [{"id": b["id"], "type": "function",
+                      "function": {"name": b["name"], "arguments": json.dumps(b.get("input", {}))}}
+                     for b in c if b.get("type") == "tool_use"]
+            if calls:
+                out["tool_calls"] = calls
+            msgs.append(out)
+        else:
+            for b in c:
+                if b.get("type") == "tool_result":
+                    msgs.append({"role": "tool", "tool_call_id": b["tool_use_id"],
+                                 "content": _text(b.get("content", ""))})
+            if _text(c):
+                msgs.append({"role": "user", "content": _text(c)})
+    out = {"model": wire_model, "messages": msgs}
+    if "max_tokens" in req:
+        out["max_tokens"] = req["max_tokens"]
+    if req.get("stop_sequences"):
+        out["stop"] = req["stop_sequences"]
+    if req.get("tools"):
+        out["tools"] = [{"type": "function", "function": {
+            "name": t["name"], "description": t.get("description", ""),
+            "parameters": t.get("input_schema", {"type": "object"})}} for t in req["tools"]]
+    tc = req.get("tool_choice")
+    if tc:
+        out["tool_choice"] = ({"auto": "auto", "any": "required", "none": "none"}.get(tc.get("type"))
+                              or {"type": "function", "function": {"name": tc.get("name")}})
+    return out
+
+
+def from_chat(resp, model):
+    """An OpenAI chat response as an Anthropic message."""
+    ch = (resp.get("choices") or [{}])[0]
+    msg = ch.get("message") or {}
+    content = [{"type": "text", "text": msg["content"]}] if msg.get("content") else []
+    for tc in msg.get("tool_calls") or []:
+        try:
+            args = json.loads(tc["function"].get("arguments") or "{}")
+        except ValueError:
+            args = {"_unparsed": tc["function"].get("arguments")}
+        content.append({"type": "tool_use", "id": tc["id"], "name": tc["function"]["name"], "input": args})
+    stop = ("tool_use" if msg.get("tool_calls")
+            else {"length": "max_tokens"}.get(ch.get("finish_reason"), "end_turn"))
+    u = resp.get("usage") or {}
+    return {"id": resp.get("id") or "msg_" + os.urandom(12).hex(), "type": "message",
+            "role": "assistant", "model": model, "content": content, "stop_reason": stop,
+            "stop_sequence": None,
+            "usage": {"input_tokens": u.get("prompt_tokens", 0), "output_tokens": u.get("completion_tokens", 0)}}
+
+
+def message_sse(msg):
+    """A whole Anthropic message replayed as its streaming events."""
+    def ev(d):
+        return ("event: %s\ndata: %s\n\n" % (d["type"], json.dumps(d))).encode()
+    out = [ev({"type": "message_start", "message": dict(msg, content=[],
+               usage=dict(msg["usage"], output_tokens=0))})]
+    for i, b in enumerate(msg["content"]):
+        if b["type"] == "text":
+            start, delta = {"type": "text", "text": ""}, {"type": "text_delta", "text": b["text"]}
+        else:
+            start = {"type": "tool_use", "id": b["id"], "name": b["name"], "input": {}}
+            delta = {"type": "input_json_delta", "partial_json": json.dumps(b["input"])}
+        out += [ev({"type": "content_block_start", "index": i, "content_block": start}),
+                ev({"type": "content_block_delta", "index": i, "delta": delta}),
+                ev({"type": "content_block_stop", "index": i})]
+    out += [ev({"type": "message_delta", "delta": {"stop_reason": msg["stop_reason"], "stop_sequence": None},
+                "usage": {"output_tokens": msg["usage"]["output_tokens"]}}),
+            ev({"type": "message_stop"})]
+    return b"".join(out)
 
 
 def sanitize_native(body, prov, wire_model):
@@ -1017,6 +1182,11 @@ class Router(BaseHTTPRequestHandler):
                 "switchboard.py policy <folder> --data any"
                 % (cwd_of(body) or "this folder", pol.get("data", "any"),
                    model or "that model"))
+        # An OpenAI-wire provider is answered on its own path, first choice only:
+        # it is never in a failover chain, so nothing can fall over onto it.
+        vendor = attempts[0].split("/")[0]
+        if (PROVIDERS.get(vendor) or {}).get("wire") == "openai":
+            return self.openai_wire(attempts[0], body, requested)
         prepared, errors = [], []
         for cand in attempts:
             got = self.prepare(cand, body)
@@ -1391,6 +1561,65 @@ class Router(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
+
+    def openai_wire(self, model, body, requested):
+        """Answer a Messages request from an OpenAI chat-completions provider.
+
+        The request is translated (to_chat), sent without streaming -- the Kaggle
+        proxy does not stream -- and the reply is translated back (from_chat) and,
+        if the client asked to stream, replayed as SSE (message_sse)."""
+        t0 = time.time()
+        vendor = model.split("/")[0]
+        prov = PROVIDERS[vendor]
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": vendor, "model_requested": model}
+        if requested and requested != model:
+            rec["auto_from"] = requested
+        if "count_tokens" in self.path:          # no such endpoint upstream: estimate
+            payload = json.dumps({"input_tokens": len(body) // 4}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            return self.wfile.write(payload)
+        got = minted_token(vendor, prov)
+        if not got:
+            return self.fail(401, "could not mint a %s token -- run: %s" % (vendor, " ".join(prov["token_env"]["mint"])))
+        url, key = got
+        req = json.loads(body)
+        chat = to_chat(req, UPSTREAM_ID.get(model) or model.split("/", 1)[1])
+        u = urllib.parse.urlsplit(url + prov.get("chat_path", "/openapi/chat/completions"))
+        try:
+            conn = http.client.HTTPSConnection(u.netloc, timeout=900)
+            conn.request("POST", u.path, body=json.dumps(chat).encode(),
+                         headers={"Authorization": "Bearer " + key, "Content-Type": "application/json"})
+            resp = conn.getresponse()
+            data = resp.read()
+        except Exception as e:
+            rec.update(status=502, error=str(e), ms=int((time.time() - t0) * 1000))
+            log_request(rec)
+            return self.fail(502, "%s: %s" % (vendor, e))
+        rec.update(status=resp.status, stream=bool(req.get("stream")), ms=int((time.time() - t0) * 1000))
+        if resp.status != 200:
+            try:
+                why = json.loads(data).get("message") or data[:300].decode(errors="replace")
+            except Exception:
+                why = data[:300].decode(errors="replace")
+            rec["error"] = why
+            log_request(rec)
+            return self.fail(resp.status, "%s %s: %s" % (vendor, chat["model"], why))
+        msg = from_chat(json.loads(data), model)
+        rec.update(model_used=chat["model"], **{"in": msg["usage"]["input_tokens"],
+                                                "out": msg["usage"]["output_tokens"]})
+        log_request(rec)
+        if req.get("stream"):
+            payload, ctype = message_sse(msg), "text/event-stream"
+        else:
+            payload, ctype = json.dumps(msg).encode(), "application/json"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
 
     def fail(self, code, msg):
         payload = json.dumps({"type": "error",
