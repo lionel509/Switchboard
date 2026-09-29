@@ -467,10 +467,14 @@ class UI(object):
         self.status = ""
         self.rows = []
         try:
-            with open(sb.SETTINGS) as f:
-                self.primary = json.load(f).get("model", "")
-        except (OSError, ValueError):
-            self.primary = ""
+            with open(sb.START_MODEL) as f:
+                self.primary = f.read().strip()
+        except OSError:
+            try:
+                with open(sb.SETTINGS) as f:
+                    self.primary = json.load(f).get("model", "")
+            except (OSError, ValueError):
+                self.primary = ""
         self.new_primary = None
         self.page = 0
         self.keyuse = {}

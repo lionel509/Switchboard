@@ -13,3 +13,6 @@ __pycache__/
 
 # Runtime plan-quota files — written by the router (kimi) and the statusline (claude)
 *-limits.json
+
+# Pinned start model — written by `route --primary`, read by the claude() wrapper
+start-model
