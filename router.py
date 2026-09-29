@@ -74,6 +74,17 @@ def gemma_kaggle_body(req):
     return out
 
 
+def gemma_error_text(data):
+    """An upstream's error message, from OpenAI-style, Kaggle-style or plain bodies."""
+    try:
+        d = json.loads(data)
+        e = d.get("error") if isinstance(d.get("error"), dict) else d
+        msg = e.get("message") or json.dumps(d)
+    except (ValueError, AttributeError):
+        msg = data.decode(errors="replace") if isinstance(data, bytes) else str(data)
+    return msg[:300]
+
+
 def gemma_or_body(req):
     """The harness request as sent to OpenRouter: the real model name, and the
     CHEAPEST zero-retention provider. Providers of this one model ranged
@@ -1620,6 +1631,8 @@ class Router(BaseHTTPRequestHandler):
             rec["provider"] = json.loads(data).get("provider")
         except (ValueError, AttributeError):
             pass
+        if resp.status >= 400:                 # the reason, not just the status
+            rec["error"] = gemma_error_text(data)
         log_request(rec)
         self.send_response(resp.status)
         self.send_header("Content-Type", resp.getheader("Content-Type", "application/json"))
