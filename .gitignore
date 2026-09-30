@@ -13,3 +13,40 @@ __pycache__/
 
 # Runtime plan-quota files — written by the router (kimi) and the statusline (claude)
 *-limits.json
+
+# --- cleanup pass (issue #36) — appended; nothing above was removed -------
+
+# Env variants; the bare `.env` rule is above. Nothing here reads an env file —
+# the key lives at ~/.config/openrouter-key — so this is a safety net.
+.env.*
+!.env.example
+.envrc
+
+# A venv + test/tool scratch, for whoever next runs pytest without a manifest
+# to tell them not to. There is no pyproject.toml/requirements.txt here: the
+# tests are stdlib + pytest on a bare checkout.
+.venv/
+venv/
+env/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Editor and OS cruft (the file above had none beyond .DS_Store)
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+Thumbs.db
+
+# Machine-local Claude Code settings. Note this program rewrites
+# ~/.claude/settings.json itself (switchboard.py:237,325-337) — that file is
+# outside the repo; only a local override beside it would ever land here.
+.claude/settings.local.json
