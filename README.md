@@ -628,3 +628,11 @@ router could establish, because the bug was in the caller.
 ## License
 
 MIT
+
+## Cleanup
+
+Teardown when this checkout is done: see [`CLEANUP.md`](CLEANUP.md) — the
+in-tree logs/limits files, the preview/clean commands that keep `.env`, and
+everything this tool keeps *outside* the repo (keys and OAuth tokens under
+`~/.config`, the `~/.claude` state it rewrites, the `~/.local/share/claude-router`
+install).
