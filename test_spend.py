@@ -24,3 +24,11 @@ def test_spend_today_groups_by_upstream_or_key_and_skips_other_days():
     assert s["gemma-or"] == {"requests": 2, "cost": 0.02, "failover_cost": 0.0, "refused": 1}
     assert s["anthropic"] == {"requests": 1, "cost": 0.0, "failover_cost": 0.0, "refused": 0}
     assert set(s) == {"openrouter", "openrouter-gemma", "gemma-or", "anthropic"}
+
+
+def test_kaggle_nanodollar_cost_dict_counts_as_usd():
+    # /gemma/kaggle logs Kaggle's cost verbatim (#32); it must not crash the panel.
+    lines = [json.dumps({"ts": "2026-09-28T20:42:54", "upstream": "gemma-kaggle", "status": 200,
+                         "cost": {"input_tokens_cost_nanodollars": 1623450,
+                                  "output_tokens_cost_nanodollars": 15000}})]
+    assert tui.spend_today(lines, "2026-09-28")["gemma-kaggle"]["cost"] == 0.001638

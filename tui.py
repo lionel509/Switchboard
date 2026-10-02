@@ -138,9 +138,9 @@ def spend_today(lines, date):
         res = results[group]
         res['requests'] += 1
 
-        cost = rec.get('cost', 0)
-        if cost is None:
-            cost = 0
+        cost = rec.get('cost') or 0
+        if isinstance(cost, dict):             # Kaggle bills in nanodollars (#32)
+            cost = sum(v for v in cost.values() if isinstance(v, (int, float))) / 1e9
         res['cost'] += cost
 
         if 'failover_from' in rec:

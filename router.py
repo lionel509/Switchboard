@@ -1622,7 +1622,9 @@ class Router(BaseHTTPRequestHandler):
         if u:
             rec.update(model_used={"or": GEMMA_OR_MODEL, "kaggle": GEMMA_KAGGLE_MODEL}.get(route, "llama-server"),
                        **{"in": u.get("prompt_tokens"), "out": u.get("completion_tokens")})
-            if u.get("cost") is not None:
+            if isinstance(u.get("cost"), dict):   # Kaggle: {"*_nanodollars": n} (#32)
+                rec["cost"] = sum(u["cost"].values()) / 1e9
+            elif u.get("cost") is not None:
                 rec["cost"] = u["cost"]
             cached = (u.get("prompt_tokens_details") or {}).get("cached_tokens")
             if cached:
