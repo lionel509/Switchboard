@@ -14,6 +14,9 @@ __pycache__/
 # Runtime plan-quota files — written by the router (kimi) and the statusline (claude)
 *-limits.json
 
+# Pinned start model — written by `route --primary`, read by the claude() wrapper
+start-model
+
 # --- cleanup pass (issue #36) — appended; nothing above was removed -------
 
 # Env variants; the bare `.env` rule is above. Nothing here reads an env file —

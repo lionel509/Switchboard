@@ -138,9 +138,9 @@ def spend_today(lines, date):
         res = results[group]
         res['requests'] += 1
 
-        cost = rec.get('cost', 0)
-        if cost is None:
-            cost = 0
+        cost = rec.get('cost') or 0
+        if isinstance(cost, dict):             # Kaggle bills in nanodollars (#32)
+            cost = sum(v for v in cost.values() if isinstance(v, (int, float))) / 1e9
         res['cost'] += cost
 
         if 'failover_from' in rec:
@@ -467,10 +467,14 @@ class UI(object):
         self.status = ""
         self.rows = []
         try:
-            with open(sb.SETTINGS) as f:
-                self.primary = json.load(f).get("model", "")
-        except (OSError, ValueError):
-            self.primary = ""
+            with open(sb.START_MODEL) as f:
+                self.primary = f.read().strip()
+        except OSError:
+            try:
+                with open(sb.SETTINGS) as f:
+                    self.primary = json.load(f).get("model", "")
+            except (OSError, ValueError):
+                self.primary = ""
         self.new_primary = None
         self.page = 0
         self.keyuse = {}
