@@ -1182,6 +1182,26 @@ def allowed(model, pol):
     return (BY_ID.get(model) or {}).get("zdr", True) is not False
 
 
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
+
+
+def pin_effort(req, model, pol):
+    """Overwrite the slider with the folder's effort level, if it sets one.
+
+    A Claude request is only rewritten when it already carries an effort: the
+    client sends none to a model that takes none (Haiku-class), and an injected
+    one would 400. A gateway model gets it regardless -- sanitize() turns it
+    into a thinking budget, and an absent level would mean the flat default.
+    """
+    level = pol.get("effort")
+    if level not in EFFORT_LEVELS:
+        return
+    oc = req.get("output_config")
+    if upstream_for(model) == "anthropic" and not (oc or {}).get("effort"):
+        return
+    req["output_config"] = dict(oc or {}, effort=level)
+
+
 class Router(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "claude-router"
@@ -1211,6 +1231,7 @@ class Router(BaseHTTPRequestHandler):
 
         pol = policy_for(cwd_of(body))
         model = requested = ""
+        effort = None
         if body:
             try:
                 req = json.loads(body)
@@ -1225,7 +1246,10 @@ class Router(BaseHTTPRequestHandler):
                 elif requested.startswith(FAMILY_PREFIX):
                     model = resolve_family(req, requested[len(FAMILY_PREFIX):],
                                            pol.get("tier"), pol)
-                if model != requested:
+                before = effort_of(req)
+                pin_effort(req, model, pol)
+                effort = effort_of(req)
+                if model != requested or effort != before:
                     req["model"] = model
                     body = json.dumps(req).encode()
 
@@ -1251,6 +1275,7 @@ class Router(BaseHTTPRequestHandler):
             if isinstance(got, str):
                 errors.append("%s: %s" % (cand, got))
             else:
+                got["effort"] = effort
                 prepared.append(got)
         if not prepared:
             return self.fail(500, "; ".join(errors) or "no usable upstream")
@@ -1412,6 +1437,8 @@ class Router(BaseHTTPRequestHandler):
                 rec["key"] = att["key_upstream"]
             if requested and requested != att["model"]:
                 rec["auto_from"] = requested
+            if att.get("effort"):
+                rec["effort"] = att["effort"]
             if i:
                 rec["failover_from"] = prepared[i - 1]["model"]
             if not take_turn(att["model"]):

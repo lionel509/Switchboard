@@ -1062,6 +1062,7 @@ def cmd_ui(args):
 
 
 DATA_LEVELS = ("claude", "zdr", "any")
+EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 
 
 def cmd_policy(args):
@@ -1083,31 +1084,40 @@ def cmd_policy(args):
             row["data"] = args.data
         if args.tier:
             row["tier"] = args.tier
+        if args.effort == "inherit":
+            row.pop("effort", None)
+        elif args.effort:
+            row["effort"] = args.effort
         if args.forget:
             if key not in pol or key == "_default":
                 print("nothing set for %s" % key, file=sys.stderr)
                 return 1
             pol.pop(key)
             print("removed the policy for %s — it falls back to _default" % key)
-        elif not (args.data or args.tier):
-            print("nothing to change; pass --data and/or --tier", file=sys.stderr)
+        elif not (args.data or args.tier or args.effort):
+            print("nothing to change; pass --data, --tier and/or --effort",
+                  file=sys.stderr)
             return 1
         save(cat)
         print("restart the router to apply")
 
     default = pol.get("_default") or {"data": "any", "tier": "pro"}
-    print("_default%s-> data %-7s tier %s"
-          % (" " * 24, default.get("data", "any"), default.get("tier", "pro")))
+    print("_default%s-> data %-7s tier %-6s effort %s"
+          % (" " * 24, default.get("data", "any"), default.get("tier", "pro"),
+             default.get("effort", "slider")))
     for path, row in sorted(pol.items()):
         if path.startswith("_") or not isinstance(row, dict):
             continue
-        print("%-31s-> data %-7s tier %s"
+        print("%-31s-> data %-7s tier %-6s effort %s"
               % (path, row.get("data", default.get("data", "any")),
-                 row.get("tier", default.get("tier", "pro"))))
+                 row.get("tier", default.get("tier", "pro")),
+                 row.get("effort", default.get("effort", "slider"))))
         if row.get("_why"):
             print("%s%s" % (" " * 34, row["_why"]))
     print("\ndata: claude = Anthropic only · zdr = third party but no retention "
           "(excludes vendor plans) · any = no restriction")
+    print("effort: pinned on every request in that folder, over the ←/→ slider · "
+          "slider = not pinned")
     print("Longest path prefix wins. An unlisted folder gets _default.")
     return 0
 
@@ -1380,6 +1390,10 @@ def main():
                           "any = no restriction")
     ap3.add_argument("--tier", help="which variant a family row resolves to here, "
                                     "e.g. pro or flash")
+    ap3.add_argument("--effort", choices=EFFORT_LEVELS + ("slider", "inherit"),
+                     help="pin the effort level for every chat in this folder, "
+                          "overriding the ←/→ slider; slider = never pin here; "
+                          "inherit = take _default's")
     ap3.add_argument("--forget", action="store_true",
                      help="drop this folder's rule so it inherits _default")
     ap3.set_defaults(fn=cmd_policy)
