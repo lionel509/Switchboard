@@ -235,6 +235,10 @@ def cmd_remove(args):
 
 
 SETTINGS = os.path.expanduser("~/.claude/settings.json")
+# The start model, kept where /model cannot reach it: Claude Code rewrites
+# settings.json "model" on every /model pick. The claude() wrapper passes this
+# as --model, so a one-off pick lasts one session.
+START_MODEL = os.path.join(HERE, "start-model")
 
 
 def cmd_apply(args):
@@ -1243,6 +1247,8 @@ def cmd_route(args):
         with open(SETTINGS, "w") as f:
             json.dump(s, f, indent=2)
             f.write("\n")
+        with open(START_MODEL, "w") as f:
+            f.write(args.primary + "\n")
         print("primary -> %s (new sessions; this one keeps its model)" % args.primary)
 
     print("\nprimary  %s" % s.get("model", "?"))

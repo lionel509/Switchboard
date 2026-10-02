@@ -572,6 +572,12 @@ claude() {
   # to CLAUDE_ROUTER_MODELS lands one launch later rather than costing ~2s every start.
   (python3 ~/.local/share/claude-router/sync-models.py \
      >/dev/null 2>>~/.local/share/claude-router/router.log &)
+  # Start on Switchboard's pinned model, not whatever /model saved last.
+  # Skipped when you pass --model yourself or run a subcommand.
+  local pin=~/.local/share/claude-router/start-model
+  case "$1" in agents|attach|auth|auto-mode|doctor|gateway|import|install|logs|mcp|plugin|plugins|project|respawn|rm|setup-token|stop|kill|ultrareview|update|upgrade) ;;
+    *) [[ -s $pin && " $* " != *" --model"* ]] && set -- --model "$(<$pin)" "$@" ;;
+  esac
   command claude "$@"
 }
 ```
