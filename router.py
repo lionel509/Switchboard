@@ -1043,7 +1043,12 @@ FAILOVER_STATUSES = frozenset((402, 429, 529))
 
 def metered(model):
     """True unless the catalog bills this model to a plan. Unknown ids count as
-    metered -- the safe guess when the question is whether a retry costs cash."""
+    metered -- the safe guess when the question is whether a retry costs cash --
+    except a bare Claude id: it goes to Anthropic on the client's own claude.ai
+    login, so a new release is a plan model before anyone lists it."""
+    if (model not in BY_ID and (model or "").startswith("claude-")
+            and upstream_for(model) == "anthropic"):
+        return False
     return (BY_ID.get(model) or {}).get("billing") != "subscription"
 
 
