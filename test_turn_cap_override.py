@@ -31,3 +31,11 @@ def test_turn_cap_zero_means_no_cap(monkeypatch):
 def test_plan_models_stay_uncapped_even_with_a_turn_cap(monkeypatch):
     setup(monkeypatch)
     assert r.turn_cap("x/plan") is None
+
+
+def test_unlisted_bare_claude_ids_are_plan_not_metered(monkeypatch):
+    # #41: claude-sonnet-5-5 / claude-fable-5-1 aren't in models.json but go to the plan
+    setup(monkeypatch)
+    assert r.turn_cap("claude-sonnet-5-5") is None
+    assert r.turn_cap("claude-fable-5-1") is None
+    assert r.turn_cap("x/unknown") == 40  # unknown metered ids still capped
