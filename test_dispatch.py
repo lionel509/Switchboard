@@ -471,10 +471,42 @@ def test_run_agy_quota_wording_unconfirmed_returns_3(monkeypatch, tmp_path):
     assert "xiaomi/mimo-v2.6-pro" not in h.models_called()
 
 
-def test_run_skips_plan_when_router_predates_46(monkeypatch, tmp_path, capsys):
-    # a pre-#46 router would let a plan run slide onto metered failover
+def test_run_stops_when_router_predates_46(monkeypatch, tmp_path, capsys):
+    # a pre-#46 (or slow) router must stop the walk, not skip to Google or cash
     h = RunHarness(monkeypatch, tmp_path)
     monkeypatch.setattr(d, "router_tagged", lambda port: False)
+    h.quota_queue = [QUOTA_LOW]
+    assert d.run(h.args) == 1
+    assert "predates #46" in capsys.readouterr().err
+    assert h.models_called() == []
+    assert not [a for a in h.calls if os.path.basename(a[0]) == "agy" and "/quota" not in a]
+
+
+def test_run_untagged_router_still_allows_explicit_from(monkeypatch, tmp_path, capsys):
+    h = RunHarness(monkeypatch, tmp_path)
+    monkeypatch.setattr(d, "router_tagged", lambda port: False)
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
     assert d.run(h.args) == 0
     assert capsys.readouterr().out == "agy answer\n"
-    assert "kimi/k3-256k" not in h.models_called()
+
+
+def test_run_canonicalises_dir_before_policy(monkeypatch, tmp_path):
+    # lowercase --dir must still hit the zdr root: no Google, no cash, exit 2
+    h = RunHarness(monkeypatch, tmp_path)
+    real = tmp_path / "State Street"
+    real.mkdir()
+    monkeypatch.setattr(d.router, "POLICY", {str(real): {"data": "zdr"}})
+    h.args.dir = str(tmp_path / "state street")
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 2
+    assert h.models_called() == []
+    assert not [a for a in h.calls if os.path.basename(a[0]) == "agy" and "/quota" not in a]
+
+
+def test_run_missing_dir_is_a_message(monkeypatch, tmp_path, capsys):
+    h = RunHarness(monkeypatch, tmp_path)
+    h.args.dir = str(tmp_path / "nope")
+    assert d.run(h.args) == 1
+    assert "no such folder" in capsys.readouterr().err
