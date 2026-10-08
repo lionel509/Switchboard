@@ -1,5 +1,5 @@
 """Headless dispatch tiers (#46). Run: python3 -m pytest test_dispatch.py"""
-import importlib.util, io, json, os, subprocess, sys, time
+import importlib.util, io, json, os, subprocess, sys, time, types
 
 spec = importlib.util.spec_from_file_location(
     "_r", os.path.join(os.path.dirname(os.path.abspath(__file__)), "router.py"))
@@ -53,12 +53,13 @@ class FakeConn:
         pass
 
 
-def relay_stub(monkeypatch, recs):
+def relay_stub(monkeypatch, recs, statuses=(429, 429)):
     h = r.Router.__new__(r.Router)
     monkeypatch.setattr(r, "log_request", recs.append)
     monkeypatch.setattr(r, "take_turn", lambda model: True)
     monkeypatch.setattr(r, "maybe_fetch_quota", lambda upstream: None)
-    h.issue = lambda method, att, rec: (FakeConn(), FakeResp(429))
+    it = iter(statuses)
+    h.issue = lambda method, att, rec: (FakeConn(), FakeResp(next(it)))
     h.fail = lambda code, msg: ("fail", code, msg)
     h.send_response = h.send_header = h.end_headers = lambda *a: None
     h.wfile = io.BytesIO()
@@ -89,6 +90,18 @@ def test_relay_plan_only_answers_402_and_tags_run(monkeypatch):
     assert out2 is None
     assert not any("run" in rec or rec.get("error") == "plan exhausted"
                    for rec in recs2)
+    # a plan: run whose last attempt ANSWERED streams through -- only a final
+    # capacity status becomes a 402 (this goes red if that check is dropped)
+    recs3 = []
+    h3 = relay_stub(monkeypatch, recs3, statuses=(429, 200))
+    assert h3.relay("POST", [dict(p) for p in PREPARED], run="plan:t2") is None
+    assert recs3[-1]["status"] == 200
+    assert "error" not in recs3[-1]
+    # same for a real upstream failure: a final 404 streams back to the caller
+    recs4 = []
+    h4 = relay_stub(monkeypatch, recs4, statuses=(404, 404))
+    assert h4.relay("POST", [dict(p) for p in PREPARED], run="plan:t3") is None
+    assert recs4[-1]["status"] == 404
 
 
 # 3. meters ------------------------------------------------------------------
@@ -114,6 +127,12 @@ def test_pick_plan_from_meters():
     assert d.pick_plan(role, {"claude": 97, "kimi": 99}, 95) is None
     assert d.pick_plan(role, {}, 95) == "claude-sonnet-5"
     assert d.pick_plan(role, {"claude": 4}, 0) is None
+    # coder override: the plan model is a Kimi id, so the KIMI meter gates it.
+    # Reading the Claude meter here starts the coder on k3-256k while Kimi is
+    # past the line, and skips a healthy k3-256k when only Claude is hot.
+    coder = {"plan": "kimi/k3-256k", "kimi": "kimi/k2.8"}
+    assert d.pick_plan(coder, {"claude": 99, "kimi": 10}, 95) == "kimi/k3-256k"
+    assert d.pick_plan(coder, {"claude": 8, "kimi": 96}, 95) is None
 
 
 # 5. agy meter parsing ---------------------------------------------------------
@@ -135,7 +154,13 @@ def test_tier_allowed_by_folder_policy(monkeypatch):
     assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {"data": "claude"}) is False
     assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {"data": "any"}) is True
     assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {}) is True
-    by_id(monkeypatch)
+    # dispatch imports its own router module (d.router is not the `_r` instance
+    # above), so the cash gate must be patched there or the asserts run against
+    # the live catalog and say nothing about this code path.
+    monkeypatch.setattr(d.router, "BY_ID", {
+        "xiaomi/mimo-v2.6-pro": {"id": "xiaomi/mimo-v2.6-pro",
+                                 "price": [0.435, 0.87], "zdr": False},
+    })
     assert d.tier_allowed("cash", "xiaomi/mimo-v2.6-pro", {"data": "zdr"}) is False
     assert d.tier_allowed("cash", "xiaomi/mimo-v2.6-pro", {"data": "any"}) is True
     assert d.tier_allowed("plan", "whatever", {"data": "zdr"}) is True
@@ -167,6 +192,27 @@ def test_agy_outcome():
     assert d.agy_outcome('{"status":"TIMEOUT"}', "")[0] == "failed"
 
 
+def test_agy_outcome_timeout_and_auth_errors_are_not_exhaustion():
+    # TIMEOUT/CANCELLED say nothing about quota, even if stderr mentions it
+    assert d.agy_outcome('{"status":"TIMEOUT"}', "see quota details")[0] == "failed"
+    assert d.agy_outcome('{"status":"CANCELLED"}', "rate limit hit")[0] == "failed"
+    # an ADC/auth failure names "quota project" without meaning exhaustion
+    assert d.agy_outcome('{"status":"ERROR","error":'
+                         '"PERMISSION_DENIED: quota project not set for user"}',
+                         "")[0] == "failed"
+    # real capacity wording still counts
+    assert d.agy_outcome('{"status":"ERROR","error":"Out of credits"}', "")[0] == "exhausted"
+    assert d.agy_outcome('{"status":"ERROR","error":"RESOURCE_EXHAUSTED"}', "")[0] == "exhausted"
+
+
+def test_agy_outcome_non_object_json():
+    # valid JSON that isn't an object must classify, not crash
+    assert d.agy_outcome("null", "")[0] == "failed"
+    assert d.agy_outcome("[1]", "")[0] == "failed"
+    assert d.agy_outcome('"x"', "")[0] == "failed"
+    assert d.agy_outcome("null", "Out of credits")[0] == "exhausted"
+
+
 # 9. ledger record for an antigravity run ---------------------------------------
 def test_agy_record_shape():
     rec = d.agy_record("agy:abc123", "coder", "gemini-3.8-flash-high", 200, 1234,
@@ -183,7 +229,8 @@ def test_agy_record_shape():
 # 10. ledger tail by run id ------------------------------------------------------
 def test_ledger_since_filters_by_run_and_offset(tmp_path):
     p = tmp_path / "requests.log"
-    l1 = json.dumps({"run": "plan:other", "status": 200}) + "\n"
+    # the pre-offset line carries THIS run id, so a seek(0) regression surfaces
+    l1 = json.dumps({"run": "plan:me", "status": 429}) + "\n"
     rest = ("not json\n"
             + json.dumps({"run": "plan:me", "status": 200}) + "\n"
             + json.dumps({"run": "plan:other", "status": 429}) + "\n")
@@ -210,3 +257,224 @@ def test_run_help_exits_zero():
     p = subprocess.run([sys.executable, os.path.join(HERE, "switchboard.py"),
                         "run", "--help"], capture_output=True)
     assert p.returncode == 0
+
+
+# 12. the folder is canonicalised before the policy lookup -----------------------
+def test_canonical_folder_restores_on_disk_case(tmp_path, monkeypatch):
+    real = tmp_path / "State Street"
+    real.mkdir()
+    here = os.getcwd()
+    got = d.canonical_folder(os.path.join(str(tmp_path), "state street"))
+    assert os.getcwd() == here                      # no cwd side effect
+    assert got == d.canonical_folder(str(real))
+    assert os.path.basename(got) == "State Street"  # macOS is case-preserving
+    # the whole point: a lowercase --dir must hit the zdr policy root
+    monkeypatch.setattr(d.router, "POLICY", {got: {"data": "zdr"}})
+    assert d.router.policy_for(got)["data"] == "zdr"
+    assert d.router.policy_for(
+        os.path.join(str(tmp_path), "state street"))["data"] == "any"
+
+
+# 13. the router advertises run-tag support on /v1/models -------------------------
+def test_models_endpoint_advertises_run_tag(monkeypatch):
+    h = r.Router.__new__(r.Router)
+    headers = {}
+    h.send_response = lambda *a: None
+    h.send_header = lambda k, v: headers.__setitem__(k.lower(), v)
+    h.end_headers = lambda: None
+    h.wfile = io.BytesIO()
+    h.headers_passthrough = lambda: {}
+    h.log_message = lambda *a: None
+    monkeypatch.setattr(r, "CANDIDATES", [])
+    monkeypatch.setattr(r, "or_key", lambda model=None: "")
+    def no_net(*a, **k):
+        raise OSError("offline")
+    monkeypatch.setattr(r.http.client, "HTTPSConnection", no_net)
+    h.models()
+    assert headers.get(d.RUN_TAG)
+
+
+# 14. dispatch.run(): the walk ---------------------------------------------------
+QUOTA_LOW = ("Gemini Models\tWeekly Limit Remaining\t1%\t2026-10-15T08:36:51Z\n"
+             "Claude Models\tWeekly Limit Remaining\t100%\t2026-10-15T08:36:51Z\n")
+
+TEST_DISPATCH_CFG = {
+    "agy": "/bin/echo",
+    "headroom": 95,
+    "roles": {"coder": {"plan": "kimi/k3-256k", "kimi": "kimi/k2.8",
+                        "antigravity": "gemini-3.8-flash-high",
+                        "agy_timeout": "45m", "cash": "xiaomi/mimo-v2.6-pro"}},
+}
+
+
+def _proc(stdout="", stderr="", rc=0):
+    return subprocess.CompletedProcess([], rc, stdout, stderr)
+
+
+class RunHarness:
+    """dispatch.run() with every subprocess, meter and ledger stubbed. `calls`
+    records each argv so tests can assert which tiers actually ran."""
+
+    def __init__(self, monkeypatch, tmp_path):
+        self.calls = []
+        self.ledger = []
+        prompt = tmp_path / "prompt.md"
+        prompt.write_text("do the thing")
+        logfile = tmp_path / "requests.log"
+        logfile.write_text("")
+        monkeypatch.setattr(d.router, "LOGFILE", str(logfile))
+        monkeypatch.setattr(d.router, "CATALOG", {"dispatch": TEST_DISPATCH_CFG})
+        monkeypatch.setattr(d.router, "POLICY", {})
+        monkeypatch.setattr(d.router, "log_request", self.ledger.append)
+        monkeypatch.setattr(d, "meters", lambda logdir: {"claude": 5, "kimi": 5})
+        monkeypatch.setattr(d, "router_tagged", lambda port: True)
+        monkeypatch.setattr(d.shutil, "which", lambda name: "/fake/" + name)
+        monkeypatch.setattr(d.subprocess, "run", self._run)
+        monkeypatch.setattr(d, "ledger_since", self._ledger_since)
+        self.plan_stdout = json.dumps({"is_error": False, "result": "plan answer"})
+        self.cash_stdout = json.dumps({"is_error": False, "result": "cash answer"})
+        self.agy_stdout = json.dumps({"status": "SUCCESS", "response": "agy answer"})
+        self.agy_stderr = ""
+        self.quota_queue = [QUOTA_OUT]
+        self.plan_recs = [{"status": 200, "upstream": "kimi",
+                           "model_requested": "kimi/k3-256k"}]
+        self.cash_recs = [{"status": 200, "upstream": "openrouter",
+                           "model_requested": "xiaomi/mimo-v2.6-pro", "cost": 0.001}]
+        self.args = types.SimpleNamespace(
+            role="coder", headroom=95, prompt_file=str(prompt), dir=str(tmp_path),
+            from_=None, no_cash=False, allowed_tools=["Read"])
+
+    def _ledger_since(self, path, offset, run):
+        return list(self.plan_recs if run.startswith("plan:") else self.cash_recs)
+
+    def _run(self, argv, **kw):
+        self.calls.append(list(argv))
+        exe = os.path.basename(str(argv[0]))
+        if exe == "nc":
+            return _proc()
+        if exe == "agy" or exe == "echo":
+            if "/quota" in argv:
+                out = (self.quota_queue.pop(0) if len(self.quota_queue) > 1
+                       else self.quota_queue[0])
+                return _proc(stdout=out)
+            return _proc(stdout=self.agy_stdout, stderr=self.agy_stderr)
+        model = argv[argv.index("--model") + 1]
+        return _proc(stdout=(self.cash_stdout if model == "xiaomi/mimo-v2.6-pro"
+                             else self.plan_stdout))
+
+    def models_called(self):
+        out = []
+        for argv in self.calls:
+            if "--model" in argv:
+                out.append(argv[argv.index("--model") + 1])
+        return out
+
+
+def run_exhausted_plan(h):
+    h.plan_stdout = json.dumps({"is_error": True, "api_error_status": 402})
+    h.plan_recs = [{"status": 402, "model_requested": "kimi/k3-256k"}]
+
+
+def test_run_plan_ok_stops_at_plan(monkeypatch, tmp_path, capsys):
+    h = RunHarness(monkeypatch, tmp_path)
+    assert d.run(h.args) == 0
+    assert capsys.readouterr().out == "plan answer\n"
+    assert h.models_called() == ["kimi/k3-256k"]
+
+
+def test_run_plan_exhausted_walks_to_antigravity(monkeypatch, tmp_path, capsys):
+    h = RunHarness(monkeypatch, tmp_path)
+    run_exhausted_plan(h)
+    assert d.run(h.args) == 0
+    assert capsys.readouterr().out == "agy answer\n"
+    assert h.models_called() == ["kimi/k3-256k", "gemini-3.8-flash-high"]
+
+
+def test_run_all_plan_exhausted_walks_to_cash(monkeypatch, tmp_path, capsys):
+    h = RunHarness(monkeypatch, tmp_path)
+    run_exhausted_plan(h)
+    h.quota_queue = [QUOTA_LOW]          # agy pre-check: 99% used
+    assert d.run(h.args) == 0
+    assert capsys.readouterr().out == "cash answer\n"
+    assert h.models_called() == ["kimi/k3-256k", "xiaomi/mimo-v2.6-pro"]
+
+
+def test_run_no_cash_stops_with_2(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    run_exhausted_plan(h)
+    h.quota_queue = [QUOTA_LOW]
+    h.args.no_cash = True
+    assert d.run(h.args) == 2
+    assert "xiaomi/mimo-v2.6-pro" not in h.models_called()
+
+
+def test_run_from_cash_skips_earlier_tiers(monkeypatch, tmp_path, capsys):
+    h = RunHarness(monkeypatch, tmp_path)
+    h.args.from_ = "cash"
+    assert d.run(h.args) == 0
+    assert capsys.readouterr().out == "cash answer\n"
+    assert h.models_called() == ["xiaomi/mimo-v2.6-pro"]
+
+
+def test_run_plan_failure_returns_3(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    h.plan_stdout = json.dumps({"is_error": True, "api_error_status": 404})
+    h.plan_recs = [{"status": 404, "model_requested": "kimi/k3-256k"}]
+    assert d.run(h.args) == 3
+    assert h.models_called() == ["kimi/k3-256k"]
+
+
+def test_run_agy_failure_returns_3_without_cash(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    run_exhausted_plan(h)
+    h.agy_stdout = json.dumps({"status": "ERROR", "error": "tool failed"})
+    assert d.run(h.args) == 3
+    assert "xiaomi/mimo-v2.6-pro" not in h.models_called()
+
+
+def test_run_missing_agy_returns_3_not_cash(monkeypatch, tmp_path):
+    # a missing agy binary means Antigravity was never tried -- cash may only
+    # run when --from cash said so explicitly
+    h = RunHarness(monkeypatch, tmp_path)
+    run_exhausted_plan(h)
+    monkeypatch.setattr(d.router, "CATALOG", {"dispatch": dict(
+        TEST_DISPATCH_CFG, agy="/nonexistent/agy")})
+    assert d.run(h.args) == 3
+    assert "xiaomi/mimo-v2.6-pro" not in h.models_called()
+    h2 = RunHarness(monkeypatch, tmp_path)
+    h2.args.from_ = "cash"
+    monkeypatch.setattr(d.router, "CATALOG", {"dispatch": dict(
+        TEST_DISPATCH_CFG, agy="/nonexistent/agy")})
+    assert d.run(h2.args) == 0
+    assert h2.models_called() == ["xiaomi/mimo-v2.6-pro"]
+
+
+def test_run_agy_quota_wording_confirmed_by_meter(monkeypatch, tmp_path, capsys):
+    # quota wording in the error text AND a meter past headroom -> walk on
+    h = RunHarness(monkeypatch, tmp_path)
+    run_exhausted_plan(h)
+    h.agy_stdout = json.dumps({"status": "ERROR", "error": "Out of credits"})
+    h.quota_queue = [QUOTA_OUT, QUOTA_LOW]   # pre-check ok, re-check exhausted
+    assert d.run(h.args) == 0
+    assert capsys.readouterr().out == "cash answer\n"
+    assert h.models_called() == ["kimi/k3-256k", "gemini-3.8-flash-high",
+                                 "xiaomi/mimo-v2.6-pro"]
+
+
+def test_run_agy_quota_wording_unconfirmed_returns_3(monkeypatch, tmp_path):
+    # quota wording but the meter still has headroom -> a failure, not cash
+    h = RunHarness(monkeypatch, tmp_path)
+    run_exhausted_plan(h)
+    h.agy_stdout = json.dumps({"status": "ERROR", "error": "Out of credits"})
+    h.quota_queue = [QUOTA_OUT, QUOTA_OUT]
+    assert d.run(h.args) == 3
+    assert "xiaomi/mimo-v2.6-pro" not in h.models_called()
+
+
+def test_run_skips_plan_when_router_predates_46(monkeypatch, tmp_path, capsys):
+    # a pre-#46 router would let a plan run slide onto metered failover
+    h = RunHarness(monkeypatch, tmp_path)
+    monkeypatch.setattr(d, "router_tagged", lambda port: False)
+    assert d.run(h.args) == 0
+    assert capsys.readouterr().out == "agy answer\n"
+    assert "kimi/k3-256k" not in h.models_called()
