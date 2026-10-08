@@ -1112,6 +1112,14 @@ def failover_chain(model):
     return out
 
 
+def attempts_for(model, pol, plan_only=False):
+    """The model plus its failover chain, filtered by the folder policy -- and,
+    for a dispatcher run tagged plan:, stripped of anything metered, so the
+    walk can try Antigravity before any cash is spent."""
+    return [m for m in [model] + failover_chain(model)
+            if allowed(m, pol) and not (plan_only and metered(m))]
+
+
 def upstream_for(model):
     """Vendor prefix first, then the generic slash rule.
 
@@ -1259,7 +1267,9 @@ class Router(BaseHTTPRequestHandler):
         # The data policy filters the whole chain, so failover cannot route around
         # it. A hand-picked model that the folder forbids is refused rather than
         # silently swapped -- a swap looks like the pick worked.
-        attempts = [m for m in [model] + failover_chain(model) if allowed(m, pol)]
+        run = self.headers.get("x-switchboard-run", "") or ""
+        plan_only = run.startswith("plan:")
+        attempts = attempts_for(model, pol, plan_only)
         if not attempts:
             return self.fail(403,
                 "%s is set to data policy %r, which does not permit %s. "
@@ -1284,7 +1294,7 @@ class Router(BaseHTTPRequestHandler):
             return self.fail(500, "; ".join(errors) or "no usable upstream")
 
         self.relay("POST" if body else self.command, prepared,
-                   requested=requested)
+                   requested=requested, run=run)
 
     def prepare(self, model, body):
         """Everything needed to issue one attempt, or a string explaining why not.
@@ -1418,7 +1428,7 @@ class Router(BaseHTTPRequestHandler):
         return conn, resp
 
 
-    def relay(self, method, prepared, requested=""):
+    def relay(self, method, prepared, requested="", run=""):
         """Issue attempts in order until one has capacity, then stream it.
 
         The decision is safe to make here because nothing has been written to the
@@ -1434,6 +1444,8 @@ class Router(BaseHTTPRequestHandler):
             last = (i == len(prepared) - 1)
             rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
                    "upstream": att["upstream"], "model_requested": att["model"]}
+            if run:
+                rec["run"] = run
             if att.get("nonzdr"):
                 rec["nonzdr"] = True
             if att.get("key_upstream"):
@@ -1477,6 +1489,20 @@ class Router(BaseHTTPRequestHandler):
             break
         if resp is None:                      # every attempt raised
             return self.fail(502, "no upstream answered")
+        if run.startswith("plan:") and resp.status in FAILOVER_STATUSES:
+            # Every plan-billed attempt was refused. Say so with a status Claude Code
+            # does not retry, so `switchboard run` moves on at once instead of after
+            # minutes of 429 backoff -- and never onto cash from here.
+            rec.update(status=resp.status, error="plan exhausted",
+                       ms=int((time.time() - t0) * 1000))
+            log_request(rec)
+            try:
+                resp.read(); conn.close()
+            except Exception:
+                pass
+            return self.fail(402, "plan quota exhausted on %s; nothing plan-billed left "
+                           "to try (switchboard run moves to its next tier)"
+                           % ", ".join(p["model"] for p in prepared))
         host, model, upstream = att["host"], att["model"], att["upstream"]
 
         streaming = resp.getheader("content-length") is None
@@ -1577,6 +1603,9 @@ class Router(BaseHTTPRequestHandler):
         payload = json.dumps({"data": out, "has_more": False}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        # Tells `switchboard run` this router understands run tags and converts
+        # plan exhaustion to a 402; without it the plan tier refuses to run.
+        self.send_header("x-switchboard-run", "plan-402")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)

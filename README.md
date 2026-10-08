@@ -538,6 +538,42 @@ already in the picker natively and would duplicate every entry.
 
 The cache is read **at startup**, so a newly surfaced model appears one launch later.
 
+## Headless runs: switchboard run
+
+`switchboard run <role>` sends a prompt (stdin or `--prompt-file`) to a headless
+coder/reviewer/general session on the first tier with headroom:
+
+1. **plan** — one `claude -p` through the router. The start model is picked from the
+   real meters (`rate-limits.json`, `kimi-limits.json` against `dispatch.headroom`,
+   default 95%): Claude while it has room, else Kimi. Kimi is *inside* this tier, not a
+   tier of its own, because the router's in-request failover survives a mid-run Claude
+   429 where a dispatcher-level restart would lose the session's work.
+2. **antigravity** — Google's own `agy` CLI in print mode, on ONE Google account
+   (pre-checked with the free `agy -p /quota`). Never its token, never a googleapis
+   endpoint of ours, never account rotation — Google's reinstatement terms call
+   circumventing usage limits a ban offence. It is neither Claude nor ZDR, so only
+   folders with data policy `any` reach it.
+3. **cash** — `claude -p --model xiaomi/mimo-v2.6-pro`. The only step that spends
+   money (~0.6¢/call measured 2026-10-08).
+
+Every `claude -p` carries `ANTHROPIC_CUSTOM_HEADERS="x-switchboard-run: plan:<id>"`. The
+router tags its ledger records with that id, strips metered models from a `plan:` run's
+failover chain, and answers **402** instead of relaying a final 429 — Claude Code fails
+fast instead of retrying a 429 for minutes, and can never slide onto MiMo before
+Antigravity has been tried. An `agy` run is logged as a ledger record with
+`upstream: "antigravity"` and no `cost` (plan-billed). A tier is skipped only on a
+positive capacity signal (402/429/529 in the run's own records, a meter past the line,
+or `agy`'s own quota wording); any other failure exits 3 rather than buying tokens.
+
+Flags: `--from plan|antigravity|cash`, `--headroom PCT`, `--no-cash`, `--dir FOLDER`
+(sets the data policy), `--allowed-tools`. Exit codes: 0 answered, 2 every tier
+exhausted or skipped, 3 a real failure. Model ids live in `models.json` `dispatch`.
+
+```
+run a1b2c3d4: plan claude-sonnet-5 (claude 4% kimi 93% used)
+run a1b2c3d4: plan: ok (anthropic 12, kimi 3)
+```
+
 ## Install
 
 Requires Python 3.9+ and an [OpenRouter](https://openrouter.ai) key.
