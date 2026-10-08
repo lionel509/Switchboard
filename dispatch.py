@@ -230,7 +230,11 @@ def run(args):
     if not prompt.strip():
         print("empty prompt — pass --prompt-file or pipe one on stdin", file=sys.stderr)
         return 1
-    folder = canonical_folder(os.path.abspath(args.dir or os.getcwd()))
+    try:
+        folder = canonical_folder(os.path.abspath(args.dir or os.getcwd()))
+    except OSError:
+        print("no such folder: %s" % args.dir, file=sys.stderr)
+        return 1
     pol = router.policy_for(folder)
     rid = uuid.uuid4().hex[:8]
     logdir = os.path.dirname(router.LOGFILE)
@@ -248,12 +252,13 @@ def run(args):
               file=sys.stderr)
         return 1
     if "plan" in tiers and not router_tagged(port):
-        # A pre-#46 router keeps metered models in the failover chain, so a
-        # plan run that 429s everywhere lands on MiMo while billed as plan.
-        print("run %s: plan: skipped (the live router predates #46 — it would "
-              "fail over onto metered models; merge, update the live tree, "
-              "restart)" % rid, file=sys.stderr)
-        tiers.remove("plan")
+        # A pre-#46 router keeps metered models in the failover chain, and an
+        # unanswered preflight can't be told apart from one. Stop rather than
+        # hand the prompt to Google or cash; --from antigravity opts past it.
+        print("run %s: stopped: the live router predates #46 or did not answer "
+              "the preflight — merge, update the live tree, restart (or pass "
+              "--from antigravity)" % rid, file=sys.stderr)
+        return 1
     env = dict(os.environ, ANTHROPIC_BASE_URL="http://127.0.0.1:%s" % port)
 
     def summary(recs):
