@@ -21,17 +21,19 @@ own ledger records or api_error_status, a meter past the headroom line, or agy
 error text matching its own quota wording). Anything else stops the walk with
 exit 3, so a broken prompt can never buy MiMo tokens.
 """
-import calendar, json, os, re, shutil, subprocess, sys, time, uuid
+import calendar, http.client, json, os, re, shutil, subprocess, sys, time, uuid
 
 import router
 
 CAPACITY = router.FAILOVER_STATUSES              # 402, 429, 529
 STALE = 30 * 60                                   # a meter file older than this says nothing
 DEFAULT_TOOLS = ["Read", "Write", "Edit", "Glob", "Grep", "Bash"]
+RUN_TAG = "x-switchboard-run"
 # Wording lifted from the agy binary's own strings ("Out of credits", RESOURCE_EXHAUSTED,
 # "rate limit") -- not yet seen live; the ledger keeps the raw text so the first real
-# exhaustion can correct this.
-AGY_QUOTA_RE = re.compile(r"out of credits|resource_exhausted|quota|rate.?limit|too many requests|\b429\b", re.I)
+# exhaustion can correct this. The bare word "quota" is NOT here: an ADC/auth failure
+# ("quota project not set") names it without meaning exhaustion.
+AGY_QUOTA_RE = re.compile(r"out of credits|resource_exhausted|rate.?limit|too many requests|\b429\b", re.I)
 
 
 def meters(logdir, now=None):
@@ -58,12 +60,18 @@ def meters(logdir, now=None):
 
 
 def pick_plan(role, used, headroom):
-    """The plan-tier start model: Claude while its meter has headroom, else
-    Kimi, else None. An unknown meter reads as headroom -- the router's 402 is
-    the backstop."""
-    for key, meter in (("plan", "claude"), ("kimi", "kimi")):
-        if used.get(meter, 0) < headroom and role.get(key):
-            return role[key]
+    """The plan-tier start model: the role's plan model while its meter has
+    headroom, else the Kimi fallback, else None. An unknown meter reads as
+    headroom -- the router's 402 is the backstop. The meter follows the model
+    id: the coder's plan override is kimi/k3-256k, so the Claude meter says
+    nothing about it."""
+    for key in ("plan", "kimi"):
+        model = role.get(key)
+        if not model:
+            continue
+        meter = "kimi" if model.startswith("kimi/") else "claude"
+        if used.get(meter, 0) < headroom:
+            return model
     return None
 
 
@@ -116,10 +124,15 @@ def agy_outcome(stdout, stderr):
         d = json.loads(stdout)
     except ValueError:
         d = {}
+    if not isinstance(d, dict):          # valid JSON like null / [1] / "x"
+        d = {}
     if d.get("status") == "SUCCESS":
         return "ok", d
     msg = " ".join(str(x) for x in (d.get("error") or d.get("error_message") or "",
                                     d.get("status") or "", stderr[-2000:]))
+    # TIMEOUT/CANCELLED say nothing about quota, whatever stderr carries.
+    if d.get("status") in ("TIMEOUT", "CANCELLED"):
+        return "failed", {"error": msg[:300], "status": d.get("status")}
     return ("exhausted" if AGY_QUOTA_RE.search(msg) else "failed",
             {"error": msg[:300], "status": d.get("status")})
 
@@ -163,6 +176,35 @@ def claude_cmd(model, tools):
             "--strict-mcp-config", "--allowedTools", *tools]
 
 
+def canonical_folder(path):
+    """The folder with its on-disk casing. macOS lookups are case-insensitive
+    but the policy roots are stored (and matched) in real case, so a lowercase
+    --dir would slip past a zdr root -- and Antigravity has no router behind
+    it to re-check. chdir+getcwd is how the OS reports the real spelling."""
+    here = os.getcwd()
+    try:
+        os.chdir(path)
+        return os.getcwd()
+    finally:
+        os.chdir(here)
+
+
+def router_tagged(port):
+    """Whether the live router understands run tags: post-#46 it advertises
+    x-switchboard-run on GET /v1/models. A pre-#46 router would let a plan run
+    fail over onto metered models, so the plan tier must not run against it."""
+    try:
+        c = http.client.HTTPConnection("127.0.0.1", int(port), timeout=5)
+        c.request("GET", "/v1/models")
+        resp = c.getresponse()
+        tagged = resp.getheader(RUN_TAG) is not None
+        resp.read()
+        c.close()
+        return tagged
+    except Exception:
+        return False
+
+
 def agy_cmd(agy, prompt, model, timeout, folder):
     return [agy, "-p", prompt, "--model", model, "--output-format", "json",
             "--print-timeout", timeout, "--dangerously-skip-permissions",
@@ -188,23 +230,31 @@ def run(args):
     if not prompt.strip():
         print("empty prompt — pass --prompt-file or pipe one on stdin", file=sys.stderr)
         return 1
-    folder = os.path.abspath(args.dir or os.getcwd())
+    folder = canonical_folder(os.path.abspath(args.dir or os.getcwd()))
     pol = router.policy_for(folder)
     rid = uuid.uuid4().hex[:8]
     logdir = os.path.dirname(router.LOGFILE)
     port = os.environ.get("CLAUDE_ROUTER_PORT", "8787")
-    if subprocess.run(["nc", "-z", "127.0.0.1", port],
-                      capture_output=True).returncode:
-        print("router not listening on :%s — run `switchboard restart`" % port,
-              file=sys.stderr)
-        return 1
-    env = dict(os.environ, ANTHROPIC_BASE_URL="http://127.0.0.1:%s" % port)
 
     tiers = ["plan", "antigravity", "cash"]
     if args.from_:
         tiers = tiers[tiers.index(args.from_):]
     if args.no_cash and "cash" in tiers:
         tiers.remove("cash")
+
+    if subprocess.run(["nc", "-z", "127.0.0.1", port],
+                      capture_output=True).returncode:
+        print("router not listening on :%s — run `switchboard restart`" % port,
+              file=sys.stderr)
+        return 1
+    if "plan" in tiers and not router_tagged(port):
+        # A pre-#46 router keeps metered models in the failover chain, so a
+        # plan run that 429s everywhere lands on MiMo while billed as plan.
+        print("run %s: plan: skipped (the live router predates #46 — it would "
+              "fail over onto metered models; merge, update the live tree, "
+              "restart)" % rid, file=sys.stderr)
+        tiers.remove("plan")
+    env = dict(os.environ, ANTHROPIC_BASE_URL="http://127.0.0.1:%s" % port)
 
     def summary(recs):
         counts = {}
@@ -264,9 +314,13 @@ def run(args):
                 continue
             agy = os.path.expanduser(cfg["agy"])
             if not os.path.exists(agy):
-                print("run %s: antigravity: skipped (no agy at %s)" % (rid, agy),
+                # Antigravity was never tried, so cash has not been earned --
+                # only an explicit `--from cash` (which skips this tier) may
+                # buy MiMo without it.
+                print("run %s: antigravity: failed — no agy at %s (fix the "
+                      "path, or rerun with --from cash)" % (rid, agy),
                       file=sys.stderr)
-                continue
+                return 3
             q = subprocess.run([agy, "-p", "/quota", "--output-format", "text",
                                 "--print-timeout", "60s"],
                                capture_output=True, text=True)
@@ -284,6 +338,20 @@ def run(args):
                                capture_output=True, text=True, cwd=folder)
             kind, d = agy_outcome(p.stdout, p.stderr)
             ms = int((time.time() - t0) * 1000)
+            if kind == "exhausted":
+                # Quota wording in error text is an unverified signal (an ADC
+                # auth failure can mention "quota"), so confirm against the
+                # free meter: only measured exhaustion walks on to cash.
+                q = subprocess.run([agy, "-p", "/quota", "--output-format", "text",
+                                    "--print-timeout", "60s"],
+                                   capture_output=True, text=True)
+                u = agy_meter(q.stdout).get(agy_bucket(model))
+                if u is None or u < args.headroom:
+                    kind = "failed"
+                    d = dict(d, error="%s (/quota shows %s%% used, below "
+                             "headroom %s — not exhaustion)"
+                             % (d.get("error") or "",
+                                "?" if u is None else u, args.headroom))
             if kind == "ok":
                 router.log_request(agy_record("agy:%s" % rid, args.role, model, 200,
                                               ms, d.get("usage") or {}))

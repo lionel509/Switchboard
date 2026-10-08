@@ -1603,6 +1603,9 @@ class Router(BaseHTTPRequestHandler):
         payload = json.dumps({"data": out, "has_more": False}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
+        # Tells `switchboard run` this router understands run tags and converts
+        # plan exhaustion to a 402; without it the plan tier refuses to run.
+        self.send_header("x-switchboard-run", "plan-402")
         self.send_header("Content-Length", str(len(payload)))
         self.end_headers()
         self.wfile.write(payload)
