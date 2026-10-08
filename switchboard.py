@@ -1313,6 +1313,11 @@ def cmd_sync(args):
     return os.spawnv(os.P_WAIT, sys.executable, [sys.executable, sync])
 
 
+def cmd_run(args):
+    import dispatch
+    return dispatch.run(args)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1420,6 +1425,22 @@ def main():
     rt.add_argument("--restart", action="store_true",
                     help="restart the router so a fallback change applies now")
     rt.set_defaults(fn=cmd_route)
+
+    rn = sub.add_parser("run", help="run a headless role prompt on the first subscription "
+                                    "with headroom: plan (Claude, then Kimi), Antigravity via "
+                                    "agy, then MiMo for cash. Prompt from --prompt-file or stdin")
+    rn.add_argument("role", help="coder, reviewer or general (models.json 'dispatch')")
+    rn.add_argument("--prompt-file", metavar="FILE")
+    rn.add_argument("--dir", metavar="FOLDER", help="working folder; sets the data policy (default: cwd)")
+    rn.add_argument("--from", dest="from_", choices=("plan", "antigravity", "cash"),
+                    help="start the walk at this tier (earlier tiers are skipped)")
+    rn.add_argument("--headroom", type=float, default=None,
+                    help="a plan meter at or past this percent used is treated as exhausted "
+                         "(default: models.json dispatch.headroom, 95)")
+    rn.add_argument("--no-cash", action="store_true", help="stop rather than fall through to MiMo")
+    rn.add_argument("--allowed-tools", nargs="+", default=["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+                    metavar="TOOL", help="passed to claude -p --allowedTools")
+    rn.set_defaults(fn=cmd_run)
 
     sub.add_parser("restart", help="restart the router so it rereads models.json"
                    ).set_defaults(fn=cmd_restart)
