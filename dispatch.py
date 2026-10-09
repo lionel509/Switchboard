@@ -103,7 +103,7 @@ def tier_allowed(name, model, pol):
     if name == "plan":
         return True
     if name == "antigravity":
-        return (pol.get("data") or "any") == "any"
+        return router.data_level(pol.get("data")) == "any"
     return router.allowed(model, pol)
 
 
@@ -177,10 +177,11 @@ def claude_cmd(model, tools):
 
 
 def canonical_folder(path):
-    """The folder with its on-disk casing. macOS lookups are case-insensitive
-    but the policy roots are stored (and matched) in real case, so a lowercase
-    --dir would slip past a zdr root -- and Antigravity has no router behind
-    it to re-check. chdir+getcwd is how the OS reports the real spelling."""
+    """The folder as the OS spells it: on-disk case, symlinks resolved.
+    Antigravity gets it as --add-dir; run() also uses it to reject a missing
+    --dir. The policy lookup takes the path as given, because router.policy_for
+    folds case and resolves symlinks itself, and the as-given spelling keeps a
+    link out of a policy folder under that folder's data (#49)."""
     here = os.getcwd()
     try:
         os.chdir(path)
@@ -235,7 +236,7 @@ def run(args):
     except OSError:
         print("no such folder: %s" % args.dir, file=sys.stderr)
         return 1
-    pol = router.policy_for(folder)
+    pol = router.policy_for(os.path.abspath(args.dir or os.getcwd()))
     rid = uuid.uuid4().hex[:8]
     logdir = os.path.dirname(router.LOGFILE)
     port = os.environ.get("CLAUDE_ROUTER_PORT", "8787")
@@ -315,7 +316,7 @@ def run(args):
             model = role["antigravity"]
             if not tier_allowed("antigravity", model, pol):
                 print("run %s: antigravity: skipped (data policy %s)"
-                      % (rid, pol.get("data") or "any"), file=sys.stderr)
+                      % (rid, router.data_level(pol.get("data"))), file=sys.stderr)
                 continue
             agy = os.path.expanduser(cfg["agy"])
             if not os.path.exists(agy):
@@ -381,7 +382,7 @@ def run(args):
             model = role["cash"]
             if not tier_allowed("cash", model, pol):
                 print("run %s: cash: skipped (data policy %s)"
-                      % (rid, pol.get("data") or "any"), file=sys.stderr)
+                      % (rid, router.data_level(pol.get("data"))), file=sys.stderr)
                 continue
             print("run %s: cash %s (metered — this spends money)"
                   % (rid, model), file=sys.stderr)
