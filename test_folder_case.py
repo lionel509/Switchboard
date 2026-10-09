@@ -57,3 +57,37 @@ typed = (BODY % (H + "/Documents/private")).encode()
 assert r.cwd_of(typed) == H + "/Documents/private", "cwd_of keeps the path as sent"
 pol = r.policy_for(r.cwd_of(typed))
 assert pol["data"] == "claude" and pol["effort"] == "xhigh", pol
+
+# Rows that differ only in case fold to one root. `switchboard policy` and the TUI key
+# a row by its typed spelling, so `policy ~/Documents/private --effort max` writes a
+# twin beside Private. The twin must never loosen the vault, in either dict order.
+BASE = {"_default": {"data": "any", "tier": "pro", "effort": "medium"},
+        "~/Documents/Private": {"data": "claude", "effort": "xhigh"}}
+for twin in ({"data": "zdr"}, {"effort": "max"}, {"data": "any"}):
+    for twin_first in (False, True):
+        rows = [("~/Documents/Private", BASE["~/Documents/Private"]),
+                ("~/Documents/private", twin)]
+        if twin_first:
+            rows.reverse()
+        r.POLICY = dict([("_default", BASE["_default"])] + rows)
+        for cwd in (H + "/Documents/Private/notes", H + "/Documents/private"):
+            pol = r.policy_for(cwd)
+            assert pol["data"] == "claude", (twin, twin_first, cwd, pol)
+            assert not r.allowed(THIRD_PARTY, pol), (twin, twin_first, cwd)
+
+# Longest prefix still wins, whatever the dict order: a looser subfolder row applies
+# inside it, and only inside it.
+for sub_first in (False, True):
+    rows = [("~/Documents/Private", {"data": "claude"}),
+            ("~/Documents/Private/Public", {"data": "any"})]
+    if sub_first:
+        rows.reverse()
+    r.POLICY = dict([("_default", {"data": "any"})] + rows)
+    assert r.policy_for(H + "/Documents/private/public/x")["data"] == "any", sub_first
+    assert r.policy_for(H + "/Documents/Private/x")["data"] == "claude", sub_first
+
+# No cwd at all (None) is "no cwd": the default, not a crash.
+r.POLICY = {"_default": {"data": "any", "tier": "pro"},
+            "~/Documents/Private": {"data": "claude"}}
+assert r.policy_for(None) == {"data": "any", "tier": "pro"}
+assert r.policy_for("") == {"data": "any", "tier": "pro"}
