@@ -480,7 +480,7 @@ def test_run_stops_when_router_predates_46(monkeypatch, tmp_path, capsys):
     assert d.run(h.args) == 1
     assert "predates #46" in capsys.readouterr().err
     assert h.models_called() == []
-    assert not [a for a in h.calls if os.path.basename(a[0]) == "agy" and "/quota" not in a]
+    assert not [a for a in h.calls if a[0] == TEST_DISPATCH_CFG["agy"] and "/quota" not in a]
 
 
 def test_run_untagged_router_still_allows_explicit_from(monkeypatch, tmp_path, capsys):
@@ -503,7 +503,7 @@ def test_run_canonicalises_dir_before_policy(monkeypatch, tmp_path):
     h.quota_queue = [QUOTA_OUT]
     assert d.run(h.args) == 2
     assert h.models_called() == []
-    assert not [a for a in h.calls if os.path.basename(a[0]) == "agy" and "/quota" not in a]
+    assert not [a for a in h.calls if a[0] == TEST_DISPATCH_CFG["agy"] and "/quota" not in a]
 
 
 def test_run_missing_dir_is_a_message(monkeypatch, tmp_path, capsys):
@@ -561,4 +561,22 @@ def test_run_dir_through_symlink_keeps_folder_policy(monkeypatch, tmp_path):
     h.quota_queue = [QUOTA_OUT]
     assert d.run(h.args) == 2
     assert h.models_called() == []
-    assert not [a for a in h.calls if os.path.basename(a[0]) == "agy" and "/quota" not in a]
+    assert not [a for a in h.calls if a[0] == TEST_DISPATCH_CFG["agy"] and "/quota" not in a]
+
+
+# 20. a --dir with ".." after a symlink keeps the folder policy it reaches (#49) ---
+def test_run_dir_dotdot_after_symlink_keeps_folder_policy(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    real = tmp_path / "Private"
+    (real / "sub").mkdir(parents=True)
+    (real / "x").mkdir()
+    other = tmp_path / "Other"
+    other.mkdir()
+    (other / "x").mkdir()
+    os.symlink(real / "sub", other / "link")
+    monkeypatch.setattr(d.router, "POLICY", {str(real): {"data": "zdr"}})
+    h.args.dir = str(other / "link" / ".." / "x")
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 2
+    assert h.models_called() == []

@@ -265,5 +265,27 @@ def test_never_looser_than_master(monkeypatch):
     assert stricter > 0
 
 
+# 12. a symlink out of a private folder keeps its effort and tier --------------
+def test_symlink_out_keeps_as_sent_effort_and_tier(tmp_path, monkeypatch):
+    real = tmp_path / "Private"
+    real.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    os.symlink(out, real / "link")
+    use(monkeypatch, {str(real): {"data": "claude", "effort": "xhigh", "tier": "plan"}})
+    pol = r.policy_for(str(real / "link" / "x"))
+    assert (r.data_level(pol["data"]), pol["effort"], pol["tier"]) == ("claude", "xhigh", "plan")
+
+
+# 13. a nested row with null or "" data inherits the enclosing row's data ------
+def test_nested_null_or_empty_data_inherits(monkeypatch):
+    for v in (None, ""):
+        use(monkeypatch, {"~/Documents/Private": {"data": "claude"},
+                          "~/Documents/Private/sub": {"data": v}})
+        assert level(H + "/Documents/Private/sub/x") == "claude", v
+        use(monkeypatch, {"~/Documents/Private": {"data": v}})
+        assert level(H + "/Documents/Private/x") == "any", v
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-q", "-p", "no:cacheprovider", __file__]))
