@@ -1224,9 +1224,9 @@ def policy_for(cwd):
 
     The cwd is matched as sent (what #40 matched) and, when absolute, as the folder
     on disk: symlinks, "." and ".." resolved on the cwd and on every root. Every key
-    but data comes from the as-sent match when it hit a row (what master used), else
-    from the on-disk match; data is the stricter of the two, so resolving a path can
-    never loosen what the as-sent spelling matched. A relative
+    comes from the match whose data is stricter (on a tie, the on-disk one, unless
+    only the as-sent one hit a row), so resolving a path can never loosen data and a
+    private folder keeps its whole row however it is reached. A relative
     cwd is matched as sent only: resolving it would read the router's own cwd.
 
     ponytail: no cwd -> the default. A bare API client sends no Environment
@@ -1236,11 +1236,9 @@ def policy_for(cwd):
     cwd = cwd or ""
     pol, hit = _layer(cwd, lambda p: p)
     if os.path.isabs(cwd):
-        real, _ = _layer(cwd, _real)
-        keep, other = (pol, real) if hit else (real, pol)
-        if _rank(other.get("data")) < _rank(keep.get("data")):
-            keep["data"] = other["data"]
-        pol = keep
+        real, real_hit = _layer(cwd, _real)
+        if (_rank(pol.get("data")), not hit) >= (_rank(real.get("data")), not real_hit):
+            pol = real
     return pol
 
 
