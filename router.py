@@ -1139,6 +1139,7 @@ def upstream_for(model):
 # is knowable at the wire without the client cooperating.
 POLICY         = CATALOG.get("folder_policy", {})
 POLICY_DEFAULT = {"data": "any", "tier": "pro"}
+DATA_STRICTNESS = {"claude": 0, "zdr": 1}   # anything else ranks as "any" (2)
 CWD_RE = re.compile(r"Primary working directory:\s*([^\r\n\"\\]+)")
 
 
@@ -1160,16 +1161,23 @@ def policy_for(cwd):
     pol = dict(POLICY.get("_default") or POLICY_DEFAULT)
     # APFS is case-insensitive: `cd private` reaches Private, and the cwd
     # arrives as typed. A missed row drops the data filter, not just effort (#40).
-    cwd = cwd.lower()
-    best, found = "", None
+    cwd = (cwd or "").lower()
+    best, hits = None, []
     for path, p in POLICY.items():
         if path.startswith("_") or not isinstance(p, dict):
             continue
         root = os.path.expanduser(path).rstrip("/").lower()
-        if (cwd == root or cwd.startswith(root + "/")) and len(root) >= len(best):
-            best, found = root, p
-    if found:
-        pol.update(found)
+        if cwd == root or cwd.startswith(root + "/"):
+            if best is None or len(root) > len(best):
+                best, hits = root, [p]
+            elif len(root) == len(best):
+                hits.append(p)
+    # Rows that differ only in case (`policy private` written beside Private)
+    # fold to one root. Apply the loosest first so the strictest data lands last.
+    dflt = pol.get("data", "any")
+    for p in sorted(hits, key=lambda p: DATA_STRICTNESS.get(p.get("data", dflt), 2),
+                    reverse=True):
+        pol.update(p)
     return pol
 
 
