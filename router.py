@@ -1196,7 +1196,7 @@ def _layer(cwd, norm):
     beside Private) apply in key order, so a JSON re-save cannot change the result.
     data is then the strictest of them, a row with no data key counting as what it
     inherits: the enclosing rows' data, or _default's when that is stricter. A row
-    that is not an object fails closed as claude.
+    that is not an object fails closed as claude. A data of null or "" counts as no data key.
     """
     pol = dict(POLICY.get("_default") or POLICY_DEFAULT)
     dflt = data = pol.get("data")
@@ -1215,18 +1215,18 @@ def _layer(cwd, norm):
         inherited = min((data, dflt), key=_rank)
         for _, p in hits:
             pol.update(p)
-        data = pol["data"] = min((p["data"] if "data" in p else inherited for _, p in hits),
-                                 key=_rank)
-    return pol
+        data = pol["data"] = min((p["data"] if p.get("data") not in (None, "") else inherited for _, p in hits), key=_rank)
+    return pol, bool(groups)
 
 
 def policy_for(cwd):
     """The folder policy for a session's cwd; _layer says how rows combine.
 
     The cwd is matched as sent (what #40 matched) and, when absolute, as the folder
-    on disk: symlinks, "." and ".." resolved on the cwd and on every root. The
-    on-disk match gives every key, but data is the stricter of the two, so
-    resolving a path can never loosen what the as-sent spelling matched. A relative
+    on disk: symlinks, "." and ".." resolved on the cwd and on every root. Every key
+    but data comes from the as-sent match when it hit a row (what master used), else
+    from the on-disk match; data is the stricter of the two, so resolving a path can
+    never loosen what the as-sent spelling matched. A relative
     cwd is matched as sent only: resolving it would read the router's own cwd.
 
     ponytail: no cwd -> the default. A bare API client sends no Environment
@@ -1234,12 +1234,13 @@ def policy_for(cwd):
     caller. Tighten only if something other than Claude Code starts talking here.
     """
     cwd = cwd or ""
-    pol = _layer(cwd, lambda p: p)
+    pol, hit = _layer(cwd, lambda p: p)
     if os.path.isabs(cwd):
-        real = _layer(cwd, _real)
-        if _rank(pol.get("data")) < _rank(real.get("data")):
-            real["data"] = pol["data"]
-        pol = real
+        real, _ = _layer(cwd, _real)
+        keep, other = (pol, real) if hit else (real, pol)
+        if _rank(other.get("data")) < _rank(keep.get("data")):
+            keep["data"] = other["data"]
+        pol = keep
     return pol
 
 
