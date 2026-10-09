@@ -56,8 +56,8 @@ assert eff(req) == "medium"
 # The level is inherited by longest prefix like data/tier.
 H = os.path.expanduser("~")
 r.POLICY = {"_default": {"data": "any", "effort": "medium"},
-            "~/Documents/Vanguard": {"data": "claude", "effort": "max"}}
-assert r.policy_for(H + "/Documents/Vanguard/entities")["effort"] == "max"
+            "~/Documents/Private": {"data": "claude", "effort": "max"}}
+assert r.policy_for(H + "/Documents/Private/notes")["effort"] == "max"
 assert r.policy_for(H + "/Documents/Citadel")["effort"] == "medium"
 r.POLICY["~/Documents/Citadel"] = {"effort": "slider"}
 assert r.policy_for(H + "/Documents/Citadel/x")["effort"] == "slider", "a folder can opt out of _default's pin"

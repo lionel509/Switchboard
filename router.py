@@ -1139,6 +1139,25 @@ def upstream_for(model):
 # is knowable at the wire without the client cooperating.
 POLICY         = CATALOG.get("folder_policy", {})
 POLICY_DEFAULT = {"data": "any", "tier": "pro"}
+DATA_RANK      = {"claude": 0, "zdr": 1, "any": 2}   # strictest first
+
+
+def data_level(v):
+    """What a folder_policy "data" value means: "claude", "zdr" or "any".
+
+    allowed() and policy_for() both read data through here, so they cannot
+    disagree. Empty means any; any other string is matched lowercased, and one
+    that is neither "claude" nor "any" means zdr (as allowed() always read it).
+    A non-string (a hand-edited list, a number) fails closed as claude.
+    """
+    if not v:
+        return "any"
+    if not isinstance(v, str):
+        return "claude"
+    v = v.lower()
+    return v if v in ("claude", "any") else "zdr"
+
+
 CWD_RE = re.compile(r"Primary working directory:\s*([^\r\n\"\\]+)")
 
 
@@ -1158,15 +1177,30 @@ def policy_for(cwd):
     caller. Tighten only if something other than Claude Code starts talking here.
     """
     pol = dict(POLICY.get("_default") or POLICY_DEFAULT)
-    best, found = "", None
+    # APFS is case-insensitive: `cd private` reaches Private, and the cwd
+    # arrives as typed. A missed row drops the data filter, not just effort (#40).
+    cwd = (cwd or "").lower()
+    best, hits = None, []
     for path, p in POLICY.items():
         if path.startswith("_") or not isinstance(p, dict):
             continue
-        root = os.path.expanduser(path).rstrip("/")
-        if (cwd == root or cwd.startswith(root + "/")) and len(root) >= len(best):
-            best, found = root, p
-    if found:
-        pol.update(found)
+        root = os.path.expanduser(path).rstrip("/").lower()
+        if cwd == root or cwd.startswith(root + "/"):
+            if best is None or len(root) > len(best):
+                best, hits = root, [(path, p)]
+            elif len(root) == len(best):
+                hits.append((path, p))
+    # Rows that differ only in case (`policy private` written beside Private)
+    # fold to one root. Apply them in key order, so a JSON re-save cannot change the
+    # result; then data is the strictest twin's, a twin with no data key counting
+    # as the default's data it would have inherited.
+    dflt = pol.get("data")
+    hits.sort(key=lambda h: h[0])
+    for _, p in hits:
+        pol.update(p)
+    if len(hits) > 1:
+        pol["data"] = min((p["data"] if "data" in p else dflt for _, p in hits),
+                          key=lambda d: DATA_RANK[data_level(d)])
     return pol
 
 
@@ -1180,7 +1214,7 @@ def allowed(model, pol):
             an undeclared one must not be assumed private.
     any     no restriction.
     """
-    data = (pol.get("data") or "any").lower()
+    data = data_level(pol.get("data"))
     if data == "any":
         return True
     up = upstream_for(model)
