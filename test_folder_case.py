@@ -91,3 +91,44 @@ r.POLICY = {"_default": {"data": "any", "tier": "pro"},
             "~/Documents/Private": {"data": "claude"}}
 assert r.policy_for(None) == {"data": "any", "tier": "pro"}
 assert r.policy_for("") == {"data": "any", "tier": "pro"}
+
+# Review 2: twins are merged by what each row means, read the way allowed() reads
+# it, and JSON key order never changes the result. Oracle: the merged policy allows
+# a model exactly when every twin alone (over the default) allows it.
+MODELS = sorted(set(r.BY_ID) | {THIRD_PARTY, "claude-opus-5-5"})
+# Controls: the catalog has models that tell the three levels apart, so the oracle
+# below can't pass vacuously.
+assert any(r.allowed(m, {"data": "zdr"}) and not r.allowed(m, {"data": "claude"}) for m in MODELS)
+assert any(r.allowed(m, {"data": "any"}) and not r.allowed(m, {"data": "zdr"}) for m in MODELS)
+# allowed() reads data lowercased, and any other value that is not "any" as zdr.
+for v, means in (("Claude", "claude"), ("ZDR", "zdr"), ("clade", "zdr"), ("", "any"), (None, "any")):
+    assert ([r.allowed(m, {"data": v}) for m in MODELS]
+            == [r.allowed(m, {"data": means}) for m in MODELS]), v
+
+
+def twins(default, a, b):
+    got = []
+    for rows in ([("~/Documents/Private", a), ("~/Documents/private", b)],
+                 [("~/Documents/private", b), ("~/Documents/Private", a)]):
+        r.POLICY = dict([("_default", default)] + rows)
+        pol = r.policy_for(H + "/Documents/Private/notes")
+        got.append(pol)
+        for m in MODELS:
+            alone = all(r.allowed(m, dict(default, **row)) for _, row in rows)
+            assert r.allowed(m, pol) == alone, (default, a, b, m, pol)
+    assert got[0] == got[1], ("JSON key order changed the policy", got)
+
+
+ANY = {"data": "any", "tier": "pro", "effort": "medium"}
+twins({"data": "claude"}, {"effort": "xhigh"}, {"data": "zdr"})   # no data key inherits claude
+twins({"data": "claude"}, {"data": None}, {"effort": "max"})
+twins(ANY, {"data": "Claude"}, {"data": "zdr"})                     # allowed() lowercases
+for u in ("ZDR", "Zdr", "CLAUDE", "clade", "zdr ", " claude"):      # unknown means zdr
+    twins(ANY, {"data": u}, {"data": "any"})
+twins(ANY, {"data": "claude", "effort": "max"}, {"data": "claude", "effort": "low"})
+
+# A hand-edited non-string data fails closed, in policy_for and in allowed().
+r.POLICY = {"_default": ANY, "~/Documents/Private": {"data": ["claude"]},
+            "~/Documents/private": {"data": "any"}}
+pol = r.policy_for(H + "/Documents/Private/x")
+assert not r.allowed(THIRD_PARTY, pol), pol
