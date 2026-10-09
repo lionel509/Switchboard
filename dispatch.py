@@ -179,9 +179,10 @@ def claude_cmd(model, tools):
 def canonical_folder(path):
     """The folder as the OS spells it: on-disk case, symlinks resolved.
     Antigravity gets it as --add-dir; run() also uses it to reject a missing
-    --dir. run() hands it and router.policy_for the same unnormalised path, so a
-    `..` after a symlink resolves the same way for both, and the as-given spelling
-    keeps a link out of a policy folder under that folder's data (#49)."""
+    --dir. run() reads the policy for the unnormalised path and for this folder
+    and keeps the stricter data, so a `..` after a symlink resolves the same way
+    for both, and the as-given spelling keeps a link out of a policy folder under
+    that folder's data (#49)."""
     here = os.getcwd()
     try:
         os.chdir(path)
@@ -238,6 +239,11 @@ def run(args):
         print("no such folder: %s" % args.dir, file=sys.stderr)
         return 1
     pol = router.policy_for(given)
+    # The agent runs in folder, so never read looser than folder does (#49).
+    here = router.policy_for(folder)
+    if (router.DATA_RANK[router.data_level(here.get("data"))]
+            < router.DATA_RANK[router.data_level(pol.get("data"))]):
+        pol = here
     rid = uuid.uuid4().hex[:8]
     logdir = os.path.dirname(router.LOGFILE)
     port = os.environ.get("CLAUDE_ROUTER_PORT", "8787")
@@ -261,7 +267,10 @@ def run(args):
               "the preflight — merge, update the live tree, restart (or pass "
               "--from antigravity)" % rid, file=sys.stderr)
         return 1
-    env = dict(os.environ, ANTHROPIC_BASE_URL="http://127.0.0.1:%s" % port)
+    # The router judges the working directory Claude Code reports, which may be
+    # $PWD: make that the folder the agent runs in, not the caller's shell (#49).
+    env = dict(os.environ, ANTHROPIC_BASE_URL="http://127.0.0.1:%s" % port,
+               PWD=folder)
 
     def summary(recs):
         counts = {}
