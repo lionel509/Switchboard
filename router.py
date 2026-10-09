@@ -1158,11 +1158,14 @@ def policy_for(cwd):
     caller. Tighten only if something other than Claude Code starts talking here.
     """
     pol = dict(POLICY.get("_default") or POLICY_DEFAULT)
+    # APFS is case-insensitive: `cd private` reaches Private, and the cwd
+    # arrives as typed. A missed row drops the data filter, not just effort (#40).
+    cwd = cwd.lower()
     best, found = "", None
     for path, p in POLICY.items():
         if path.startswith("_") or not isinstance(p, dict):
             continue
-        root = os.path.expanduser(path).rstrip("/")
+        root = os.path.expanduser(path).rstrip("/").lower()
         if (cwd == root or cwd.startswith(root + "/")) and len(root) >= len(best):
             best, found = root, p
     if found:
