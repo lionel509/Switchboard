@@ -179,10 +179,9 @@ def claude_cmd(model, tools):
 def canonical_folder(path):
     """The folder as the OS spells it: on-disk case, symlinks resolved.
     Antigravity gets it as --add-dir; run() also uses it to reject a missing
-    --dir. The policy lookup takes the path as given, unnormalised (abspath would
-    collapse a `..` after a symlink), because router.policy_for
-    folds case and resolves symlinks itself, and the as-given spelling keeps a
-    link out of a policy folder under that folder's data (#49)."""
+    --dir. run() hands it and router.policy_for the same unnormalised path, so a
+    `..` after a symlink resolves the same way for both, and the as-given spelling
+    keeps a link out of a policy folder under that folder's data (#49)."""
     here = os.getcwd()
     try:
         os.chdir(path)
@@ -232,12 +231,13 @@ def run(args):
     if not prompt.strip():
         print("empty prompt — pass --prompt-file or pipe one on stdin", file=sys.stderr)
         return 1
+    given = os.path.join(os.getcwd(), args.dir) if args.dir else os.getcwd()
     try:
-        folder = canonical_folder(os.path.abspath(args.dir or os.getcwd()))
+        folder = canonical_folder(given)
     except OSError:
         print("no such folder: %s" % args.dir, file=sys.stderr)
         return 1
-    pol = router.policy_for(os.path.join(os.getcwd(), args.dir) if args.dir else os.getcwd())
+    pol = router.policy_for(given)
     rid = uuid.uuid4().hex[:8]
     logdir = os.path.dirname(router.LOGFILE)
     port = os.environ.get("CLAUDE_ROUTER_PORT", "8787")
