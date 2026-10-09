@@ -271,8 +271,9 @@ def test_canonical_folder_restores_on_disk_case(tmp_path, monkeypatch):
     # the whole point: a lowercase --dir must hit the zdr policy root
     monkeypatch.setattr(d.router, "POLICY", {got: {"data": "zdr"}})
     assert d.router.policy_for(got)["data"] == "zdr"
+    # since #40 the router folds case itself, so the raw spelling hits it too
     assert d.router.policy_for(
-        os.path.join(str(tmp_path), "state street"))["data"] == "any"
+        os.path.join(str(tmp_path), "state street"))["data"] == "zdr"
 
 
 # 13. the router advertises run-tag support on /v1/models -------------------------
