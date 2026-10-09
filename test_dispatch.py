@@ -511,3 +511,54 @@ def test_run_missing_dir_is_a_message(monkeypatch, tmp_path, capsys):
     h.args.dir = str(tmp_path / "nope")
     assert d.run(h.args) == 1
     assert "no such folder" in capsys.readouterr().err
+
+
+# 16. dispatch reads data through router.data_level (#49) ----------------------
+def test_tier_allowed_reads_data_through_router(monkeypatch):
+    monkeypatch.setattr(d.router, "data_level", lambda v: "claude")
+    assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {"data": "any"}) is False
+    monkeypatch.setattr(d.router, "data_level", lambda v: "any")
+    assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {"data": "zdr"}) is True
+
+
+# 17. falsy and non-string data fail closed in dispatch (#49) -------------------
+def test_tier_allowed_falsy_data_fails_closed(monkeypatch):
+    monkeypatch.setattr(d.router, "BY_ID", {
+        "kimi/k2.8": {"id": "kimi/k2.8", "billing": "subscription"}})
+    for v in (False, 0, [], {}):
+        assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {"data": v}) is False, v
+        assert d.tier_allowed("cash", "kimi/k2.8", {"data": v}) is False, v
+    for v in (None, ""):
+        assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {"data": v}) is True, v
+
+
+# 18. the skip message names the level it read (#49) ---------------------------
+def test_run_skip_message_names_the_level(monkeypatch, tmp_path, capsys):
+    h = RunHarness(monkeypatch, tmp_path)
+    real = tmp_path / "State Street"
+    real.mkdir()
+    monkeypatch.setattr(d.router, "POLICY", {str(real): {"data": False}})
+    h.args.dir = str(real)
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 2
+    err = capsys.readouterr().err
+    assert "antigravity: skipped (data policy claude)" in err
+    assert "cash: skipped (data policy claude)" in err
+
+
+# 19. a --dir through a symlink keeps the policy of the folder it names (#49) ---
+def test_run_dir_through_symlink_keeps_folder_policy(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    real = tmp_path / "Private"
+    real.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    os.symlink(out, real / "link")
+    monkeypatch.setattr(d.router, "POLICY", {str(real): {"data": "zdr"}})
+    h.args.dir = str(real / "link")
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 2
+    assert h.models_called() == []
+    assert not [a for a in h.calls if os.path.basename(a[0]) == "agy" and "/quota" not in a]
