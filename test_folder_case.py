@@ -100,8 +100,8 @@ MODELS = sorted(set(r.BY_ID) | {THIRD_PARTY, "claude-opus-5-5"})
 # below can't pass vacuously.
 assert any(r.allowed(m, {"data": "zdr"}) and not r.allowed(m, {"data": "claude"}) for m in MODELS)
 assert any(r.allowed(m, {"data": "any"}) and not r.allowed(m, {"data": "zdr"}) for m in MODELS)
-# allowed() reads data lowercased, and any other value that is not "any" as zdr.
-for v, means in (("Claude", "claude"), ("ZDR", "zdr"), ("clade", "zdr"), ("", "any"), (None, "any")):
+# allowed() reads data lowercased; a value that is not claude/zdr/any reads as claude (#49).
+for v, means in (("Claude", "claude"), ("ZDR", "zdr"), ("clade", "claude"), ("", "any"), (None, "any")):
     assert ([r.allowed(m, {"data": v}) for m in MODELS]
             == [r.allowed(m, {"data": means}) for m in MODELS]), v
 
@@ -123,7 +123,7 @@ ANY = {"data": "any", "tier": "pro", "effort": "medium"}
 twins({"data": "claude"}, {"effort": "xhigh"}, {"data": "zdr"})   # no data key inherits claude
 twins({"data": "claude"}, {"data": None}, {"effort": "max"})
 twins(ANY, {"data": "Claude"}, {"data": "zdr"})                     # allowed() lowercases
-for u in ("ZDR", "Zdr", "CLAUDE", "clade", "zdr ", " claude"):      # unknown means zdr
+for u in ("ZDR", "Zdr", "CLAUDE", "clade", "zdr ", " claude"):      # unknown means claude
     twins(ANY, {"data": u}, {"data": "any"})
 twins(ANY, {"data": "claude", "effort": "max"}, {"data": "claude", "effort": "low"})
 

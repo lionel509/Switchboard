@@ -103,7 +103,7 @@ def tier_allowed(name, model, pol):
     if name == "plan":
         return True
     if name == "antigravity":
-        return (pol.get("data") or "any") == "any"
+        return router.data_level(pol.get("data")) == "any"
     return router.allowed(model, pol)
 
 
@@ -177,10 +177,12 @@ def claude_cmd(model, tools):
 
 
 def canonical_folder(path):
-    """The folder with its on-disk casing. macOS lookups are case-insensitive
-    but the policy roots are stored (and matched) in real case, so a lowercase
-    --dir would slip past a zdr root -- and Antigravity has no router behind
-    it to re-check. chdir+getcwd is how the OS reports the real spelling."""
+    """The folder as the OS spells it: on-disk case, symlinks resolved.
+    Antigravity gets it as --add-dir; run() also uses it to reject a missing
+    --dir. run() reads the policy for the unnormalised path and for this folder
+    and keeps the stricter data, so a `..` after a symlink resolves the same way
+    for both, and the as-given spelling keeps a link out of a policy folder under
+    that folder's data (#49)."""
     here = os.getcwd()
     try:
         os.chdir(path)
@@ -230,12 +232,18 @@ def run(args):
     if not prompt.strip():
         print("empty prompt — pass --prompt-file or pipe one on stdin", file=sys.stderr)
         return 1
+    given = os.path.join(os.getcwd(), args.dir) if args.dir else os.getcwd()
     try:
-        folder = canonical_folder(os.path.abspath(args.dir or os.getcwd()))
+        folder = canonical_folder(given)
     except OSError:
         print("no such folder: %s" % args.dir, file=sys.stderr)
         return 1
-    pol = router.policy_for(folder)
+    pol = router.policy_for(given)
+    # The agent runs in folder, so never read looser than folder does (#49).
+    here = router.policy_for(folder)
+    if (router.DATA_RANK[router.data_level(here.get("data"))]
+            < router.DATA_RANK[router.data_level(pol.get("data"))]):
+        pol = here
     rid = uuid.uuid4().hex[:8]
     logdir = os.path.dirname(router.LOGFILE)
     port = os.environ.get("CLAUDE_ROUTER_PORT", "8787")
@@ -259,7 +267,10 @@ def run(args):
               "the preflight — merge, update the live tree, restart (or pass "
               "--from antigravity)" % rid, file=sys.stderr)
         return 1
-    env = dict(os.environ, ANTHROPIC_BASE_URL="http://127.0.0.1:%s" % port)
+    # The router judges the working directory Claude Code reports, which may be
+    # $PWD: make that the folder the agent runs in, not the caller's shell (#49).
+    env = dict(os.environ, ANTHROPIC_BASE_URL="http://127.0.0.1:%s" % port,
+               PWD=folder)
 
     def summary(recs):
         counts = {}
@@ -315,7 +326,7 @@ def run(args):
             model = role["antigravity"]
             if not tier_allowed("antigravity", model, pol):
                 print("run %s: antigravity: skipped (data policy %s)"
-                      % (rid, pol.get("data") or "any"), file=sys.stderr)
+                      % (rid, router.data_level(pol.get("data"))), file=sys.stderr)
                 continue
             agy = os.path.expanduser(cfg["agy"])
             if not os.path.exists(agy):
@@ -381,7 +392,7 @@ def run(args):
             model = role["cash"]
             if not tier_allowed("cash", model, pol):
                 print("run %s: cash: skipped (data policy %s)"
-                      % (rid, pol.get("data") or "any"), file=sys.stderr)
+                      % (rid, router.data_level(pol.get("data"))), file=sys.stderr)
                 continue
             print("run %s: cash %s (metered — this spends money)"
                   % (rid, model), file=sys.stderr)

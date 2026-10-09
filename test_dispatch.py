@@ -480,7 +480,7 @@ def test_run_stops_when_router_predates_46(monkeypatch, tmp_path, capsys):
     assert d.run(h.args) == 1
     assert "predates #46" in capsys.readouterr().err
     assert h.models_called() == []
-    assert not [a for a in h.calls if os.path.basename(a[0]) == "agy" and "/quota" not in a]
+    assert not [a for a in h.calls if a[0] == TEST_DISPATCH_CFG["agy"] and "/quota" not in a]
 
 
 def test_run_untagged_router_still_allows_explicit_from(monkeypatch, tmp_path, capsys):
@@ -503,7 +503,7 @@ def test_run_canonicalises_dir_before_policy(monkeypatch, tmp_path):
     h.quota_queue = [QUOTA_OUT]
     assert d.run(h.args) == 2
     assert h.models_called() == []
-    assert not [a for a in h.calls if os.path.basename(a[0]) == "agy" and "/quota" not in a]
+    assert not [a for a in h.calls if a[0] == TEST_DISPATCH_CFG["agy"] and "/quota" not in a]
 
 
 def test_run_missing_dir_is_a_message(monkeypatch, tmp_path, capsys):
@@ -511,3 +511,196 @@ def test_run_missing_dir_is_a_message(monkeypatch, tmp_path, capsys):
     h.args.dir = str(tmp_path / "nope")
     assert d.run(h.args) == 1
     assert "no such folder" in capsys.readouterr().err
+
+
+# 16. dispatch reads data through router.data_level (#49) ----------------------
+def test_tier_allowed_reads_data_through_router(monkeypatch):
+    monkeypatch.setattr(d.router, "data_level", lambda v: "claude")
+    assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {"data": "any"}) is False
+    monkeypatch.setattr(d.router, "data_level", lambda v: "any")
+    assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {"data": "zdr"}) is True
+
+
+# 17. falsy and non-string data fail closed in dispatch (#49) -------------------
+def test_tier_allowed_falsy_data_fails_closed(monkeypatch):
+    monkeypatch.setattr(d.router, "BY_ID", {
+        "kimi/k2.8": {"id": "kimi/k2.8", "billing": "subscription"}})
+    for v in (False, 0, [], {}):
+        assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {"data": v}) is False, v
+        assert d.tier_allowed("cash", "kimi/k2.8", {"data": v}) is False, v
+    for v in (None, ""):
+        assert d.tier_allowed("antigravity", "gemini-3.8-flash-high", {"data": v}) is True, v
+
+
+# 18. the skip message names the level it read (#49) ---------------------------
+def test_run_skip_message_names_the_level(monkeypatch, tmp_path, capsys):
+    h = RunHarness(monkeypatch, tmp_path)
+    real = tmp_path / "State Street"
+    real.mkdir()
+    monkeypatch.setattr(d.router, "POLICY", {str(real): {"data": False}})
+    h.args.dir = str(real)
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 2
+    err = capsys.readouterr().err
+    assert "antigravity: skipped (data policy claude)" in err
+    assert "cash: skipped (data policy claude)" in err
+
+
+# 19. a --dir through a symlink keeps the policy of the folder it names (#49) ---
+def test_run_dir_through_symlink_keeps_folder_policy(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    real = tmp_path / "Private"
+    real.mkdir()
+    out = tmp_path / "out"
+    out.mkdir()
+    os.symlink(out, real / "link")
+    monkeypatch.setattr(d.router, "POLICY", {str(real): {"data": "zdr"}})
+    h.args.dir = str(real / "link")
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 2
+    assert h.models_called() == []
+    assert not [a for a in h.calls if a[0] == TEST_DISPATCH_CFG["agy"] and "/quota" not in a]
+
+
+# 20. a --dir with ".." after a symlink keeps the folder policy it reaches (#49) ---
+def test_run_dir_dotdot_after_symlink_keeps_folder_policy(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    real = tmp_path / "Private"
+    (real / "sub").mkdir(parents=True)
+    (real / "x").mkdir()
+    other = tmp_path / "Other"
+    other.mkdir()
+    (other / "x").mkdir()
+    os.symlink(real / "sub", other / "link")
+    monkeypatch.setattr(d.router, "POLICY", {str(real): {"data": "zdr"}})
+    h.args.dir = str(other / "link" / ".." / "x")
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 2
+    assert h.models_called() == []
+
+def test_run_dir_link_dotdot_never_reaches_private(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    (tmp_path / "Private" / "x").mkdir(parents=True)
+    (tmp_path / "Elsewhere" / "deep").mkdir(parents=True)
+    os.symlink(tmp_path / "Elsewhere" / "deep", tmp_path / "Link")
+    monkeypatch.setattr(d.router, "POLICY", {str(tmp_path / "Private"): {"data": "claude"}})
+    h.args.dir = str(tmp_path / "Link" / ".." / "Private" / "x")
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 1
+    assert h.calls == []
+
+
+def test_run_reads_policy_for_the_folder_it_runs_in(monkeypatch, tmp_path):
+    spells = ["Other/link/../x", "Link/../Private/x", "Other/link",
+              "Private/out/../x", "Private/out"]
+    for i, spell in enumerate(spells):
+        base = tmp_path / str(i)
+        for sub in ("Private/sub", "Private/x", "Other/x", "Elsewhere/deep",
+                    "Elsewhere/Private/x", "outdir", "x"):
+            (base / sub).mkdir(parents=True)
+        os.symlink(base / "Private" / "sub", base / "Other" / "link")
+        os.symlink(base / "Elsewhere" / "deep", base / "Link")
+        os.symlink(base / "outdir", base / "Private" / "out")
+        h = RunHarness(monkeypatch, base)
+        looked = []
+        real_policy_for = d.router.policy_for
+        monkeypatch.setattr(d.router, "policy_for",
+                            lambda c, f=real_policy_for: (looked.append(c), f(c))[1])
+        h.args.dir = str(base / spell)
+        h.args.from_ = "antigravity"
+        assert d.run(h.args) == 0, spell
+        agy = [a for a in h.calls if a[0] == TEST_DISPATCH_CFG["agy"] and "/quota" not in a]
+        assert os.path.realpath(looked[0]) == agy[0][agy[0].index("--add-dir") + 1], spell
+        monkeypatch.setattr(d.router, "policy_for", real_policy_for)
+
+
+# 21. the run folder is the floor for dispatch's data (#49) --------------------
+def test_run_link_row_into_private_keeps_run_folder_data(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    (tmp_path / "Private" / "sub").mkdir(parents=True)
+    (tmp_path / "Work").mkdir()
+    os.symlink(tmp_path / "Private" / "sub", tmp_path / "Work" / "Link")
+    monkeypatch.setattr(d.router, "POLICY", {
+        str(tmp_path / "Private"): {"data": "claude"},
+        str(tmp_path / "Work" / "Link"): {"data": "any"}})
+    h.args.dir = str(tmp_path / "Work" / "Link")
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 2
+    assert h.models_called() == []
+
+
+def test_run_policy_floor_is_the_resolved_run_folder(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    (tmp_path / "Private" / "x").mkdir(parents=True)
+    (tmp_path / "Public" / "x").mkdir(parents=True)
+    os.symlink(tmp_path / "Private" / "x", tmp_path / "Link")
+    monkeypatch.setattr(d.router, "POLICY", {str(tmp_path / "Private"): {"data": "claude"}})
+    real_policy_for = d.router.policy_for
+    swapped = []
+
+    def swap_then_lookup(cwd):
+        if not swapped:
+            swapped.append(1)
+            os.unlink(tmp_path / "Link")
+            os.symlink(tmp_path / "Public" / "x", tmp_path / "Link")
+        return real_policy_for(cwd)
+
+    monkeypatch.setattr(d.router, "policy_for", swap_then_lookup)
+    h.args.dir = str(tmp_path / "Link")
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 2
+    assert h.models_called() == []
+
+
+# 22. Claude Code is told the run folder, not the caller's shell (#49) ---------
+def test_run_claude_child_pwd_is_the_run_folder(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    (tmp_path / "Private").mkdir()
+    (tmp_path / "Public").mkdir()
+    monkeypatch.setenv("PWD", str(tmp_path / "Public"))
+    seen = []
+    inner = h._run
+    monkeypatch.setattr(d.subprocess, "run",
+                        lambda argv, **kw: (seen.append((list(argv), kw)), inner(argv, **kw))[1])
+    h.args.dir = str(tmp_path / "Private")
+    want = d.canonical_folder(str(tmp_path / "Private"))
+    assert d.run(h.args) == 0
+    h.args.from_ = "cash"
+    assert d.run(h.args) == 0
+    pwds = [kw["env"]["PWD"] for argv, kw in seen if "--model" in argv and "env" in kw]
+    assert pwds == [want, want]
+
+
+# 23. invariant over writer-made rows: dispatch's data is the stricter of the
+#     --dir as given and the folder the agent runs in (#49) --------------------
+def test_run_data_never_looser_than_given_or_run_folder(monkeypatch, tmp_path):
+    import itertools
+    h = RunHarness(monkeypatch, tmp_path)
+    h.args.from_ = "antigravity"
+    h.args.no_cash = True
+    for sub in ("Private/sub", "Work", "Elsewhere"):
+        (tmp_path / sub).mkdir(parents=True)
+    os.symlink(tmp_path / "Private" / "sub", tmp_path / "Work" / "Link")
+    os.symlink(tmp_path / "Elsewhere", tmp_path / "Private" / "out")
+    roots = ["Private", "Private/sub", "Work", "Work/Link"]
+    spells = ["Work/Link", "Private/sub", "Work/Link/../sub", "Private/out", "Work"]
+    # per root: no row, a row with no data key, or each level a writer stores
+    for datas in itertools.product(("-", None, "claude", "zdr", "any"), repeat=len(roots)):
+        rows = {str(tmp_path / root): ({} if v is None else {"data": v})
+                for root, v in zip(roots, datas) if v != "-"}
+        monkeypatch.setattr(d.router, "POLICY", rows)
+        for spell in spells:
+            given = os.path.join(str(tmp_path), spell)
+            levels = {d.router.data_level(d.router.policy_for(p).get("data"))
+                      for p in (given, d.canonical_folder(given))}
+            h.args.dir = given
+            h.calls = []
+            rc = d.run(h.args)
+            ran = h.models_called() != []
+            assert ran == (levels == {"any"}), (spell, datas, levels, rc)

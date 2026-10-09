@@ -342,9 +342,17 @@ def loosens(old, new):
 def cycle_policy(cat, key, field):
     pol = cat.setdefault("folder_policy", {"_default": {"data": "any", "tier": "pro"}})
     row = pol.setdefault(key, {})
-    order = POLICY_DATA if field == "data" else POLICY_TIER
-    cur = row.get(field) or (pol.get("_default") or {}).get(field) or order[0]
-    row[field] = order[(order.index(cur) + 1) % len(order)] if cur in order else order[0]
+    if field == "data":
+        # A row with no data inherits a level this editor can't see (an enclosing
+        # folder's, #49), and the router reads an unknown hand-edited value as
+        # claude, so the first enter on either lands on claude: never a loosening.
+        cur = row.get("data")
+        row["data"] = (POLICY_DATA[(POLICY_DATA.index(cur) + 1) % len(POLICY_DATA)]
+                       if cur in POLICY_DATA else "claude")
+        return
+    cur = row.get(field) or (pol.get("_default") or {}).get(field) or POLICY_TIER[0]
+    row[field] = (POLICY_TIER[(POLICY_TIER.index(cur) + 1) % len(POLICY_TIER)]
+                  if cur in POLICY_TIER else POLICY_TIER[0])
 
 
 # ---- per-model settings (#19) ----------------------------------------------

@@ -13,7 +13,7 @@ Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
 and is stripped on both third-party paths — it never leaves this machine toward
 OpenRouter or a vendor endpoint.
 """
-import base64, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
+import base64, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, unicodedata, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -1145,17 +1145,21 @@ DATA_RANK      = {"claude": 0, "zdr": 1, "any": 2}   # strictest first
 def data_level(v):
     """What a folder_policy "data" value means: "claude", "zdr" or "any".
 
-    allowed() and policy_for() both read data through here, so they cannot
-    disagree. Empty means any; any other string is matched lowercased, and one
-    that is neither "claude" nor "any" means zdr (as allowed() always read it).
-    A non-string (a hand-edited list, a number) fails closed as claude.
+    allowed(), policy_for() and dispatch.tier_allowed() all read data through
+    here, so they cannot disagree. None and "" mean any; "claude", "zdr" and
+    "any" are matched lowercased. Anything else -- a typo such as "clade", a
+    padded " claude", false, 0, a list -- fails closed as claude (#49).
     """
-    if not v:
+    if v is None or v == "":
         return "any"
     if not isinstance(v, str):
         return "claude"
     v = v.lower()
-    return v if v in ("claude", "any") else "zdr"
+    return v if v in DATA_RANK else "claude"
+
+
+def _rank(v):
+    return DATA_RANK[data_level(v)]
 
 
 CWD_RE = re.compile(r"Primary working directory:\s*([^\r\n\"\\]+)")
@@ -1169,38 +1173,72 @@ def cwd_of(body):
     return m.group(1).strip().rstrip("/") if m else ""
 
 
+def _fold(p):
+    """One spelling per name, compared the way APFS does: full case fold, then
+    NFD. .lower() missed ß/SS, final sigma, and NFC against NFD (#49)."""
+    return unicodedata.normalize("NFD", p.casefold())
+
+
+def _real(p):
+    """p with symlinks, "." and ".." resolved; lexical when the disk can't say
+    (realpath raises ValueError on a NUL in the path)."""
+    try:
+        return os.path.realpath(p)
+    except (OSError, ValueError):
+        return os.path.normpath(p)
+
+
+def _layer(cwd, norm):
+    """The policy for one spelling of cwd; norm is applied to cwd and every root.
+
+    Every row whose folder holds cwd applies, shortest root first, so a subfolder
+    inherits its vault's rule. Rows that fold to one root (`policy private` written
+    beside Private) apply in key order, so a JSON re-save cannot change the result.
+    data is then the strictest of them, a row with no data key counting as what it
+    inherits: the enclosing rows' data, or _default's when that is stricter. A row
+    that is not an object fails closed as claude. A data of null or "" counts as no data key.
+    """
+    pol = dict(POLICY.get("_default") or POLICY_DEFAULT)
+    dflt = data = pol.get("data")
+    cwd = _fold(norm(cwd))
+    groups = {}
+    for path, p in POLICY.items():
+        if path.startswith("_"):
+            continue
+        if not isinstance(p, dict):
+            p = {"data": "claude"}
+        root = _fold(norm(os.path.expanduser(path))).rstrip("/")
+        if cwd == root or cwd.startswith(root + "/"):
+            groups.setdefault(root, []).append((path, p))
+    for root in sorted(groups, key=len):
+        hits = sorted(groups[root], key=lambda h: h[0])
+        inherited = min((data, dflt), key=_rank)
+        for _, p in hits:
+            pol.update(p)
+        data = pol["data"] = min((p["data"] if p.get("data") not in (None, "") else inherited for _, p in hits), key=_rank)
+    return pol, bool(groups)
+
+
 def policy_for(cwd):
-    """Longest-prefix folder policy, so a subfolder inherits its vault's rule.
+    """The folder policy for a session's cwd; _layer says how rows combine.
+
+    The cwd is matched as sent (what #40 matched) and, when absolute, as the folder
+    on disk: symlinks, "." and ".." resolved on the cwd and on every root. Every key
+    comes from the match whose data is stricter (on a tie, the on-disk one, unless
+    only the as-sent one hit a row), so resolving a path can never loosen data and a
+    private folder keeps its whole row however it is reached. A relative
+    cwd is matched as sent only: resolving it would read the router's own cwd.
 
     ponytail: no cwd -> the default. A bare API client sends no Environment
     block, and failing closed on an unknown cwd would break every non-Claude-Code
     caller. Tighten only if something other than Claude Code starts talking here.
     """
-    pol = dict(POLICY.get("_default") or POLICY_DEFAULT)
-    # APFS is case-insensitive: `cd private` reaches Private, and the cwd
-    # arrives as typed. A missed row drops the data filter, not just effort (#40).
-    cwd = (cwd or "").lower()
-    best, hits = None, []
-    for path, p in POLICY.items():
-        if path.startswith("_") or not isinstance(p, dict):
-            continue
-        root = os.path.expanduser(path).rstrip("/").lower()
-        if cwd == root or cwd.startswith(root + "/"):
-            if best is None or len(root) > len(best):
-                best, hits = root, [(path, p)]
-            elif len(root) == len(best):
-                hits.append((path, p))
-    # Rows that differ only in case (`policy private` written beside Private)
-    # fold to one root. Apply them in key order, so a JSON re-save cannot change the
-    # result; then data is the strictest twin's, a twin with no data key counting
-    # as the default's data it would have inherited.
-    dflt = pol.get("data")
-    hits.sort(key=lambda h: h[0])
-    for _, p in hits:
-        pol.update(p)
-    if len(hits) > 1:
-        pol["data"] = min((p["data"] if "data" in p else dflt for _, p in hits),
-                          key=lambda d: DATA_RANK[data_level(d)])
+    cwd = cwd or ""
+    pol, hit = _layer(cwd, lambda p: p)
+    if os.path.isabs(cwd):
+        real, real_hit = _layer(cwd, _real)
+        if (_rank(pol.get("data")), not hit) >= (_rank(real.get("data")), not real_hit):
+            pol = real
     return pol
 
 

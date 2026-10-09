@@ -60,3 +60,33 @@ def test_policy_cycles_data_and_tier():
 def test_loosening_is_detected_both_ways():
     assert tui.loosens("claude", "any") and tui.loosens("zdr", "any") and tui.loosens("claude", "zdr")
     assert not tui.loosens("any", "zdr") and not tui.loosens("zdr", "claude") and not tui.loosens("zdr", "zdr")
+
+
+def test_cycle_unknown_data_lands_on_claude():
+    # A hand-edited value the router reads as claude (#49): the first enter lands there.
+    for bad in ("clade", "ZDR", "Any", " claude", [], 0, False):
+        c = cat()
+        c["folder_policy"]["~/Documents/X"] = {"data": bad}
+        tui.cycle_policy(c, "~/Documents/X", "data")
+        assert c["folder_policy"]["~/Documents/X"]["data"] == "claude", bad
+
+
+def test_cycle_row_without_data_lands_on_claude():
+    # A row with no data inherits a level the editor can't see (#49); a new row too.
+    c = cat()
+    c["folder_policy"]["~/Documents/State Street/sub"] = {"effort": "max"}
+    tui.cycle_policy(c, "~/Documents/State Street/sub", "data")
+    row = c["folder_policy"]["~/Documents/State Street/sub"]
+    assert row["data"] == "claude" and row["effort"] == "max"
+    tui.cycle_policy(c, "~/Documents/New", "data")
+    assert c["folder_policy"]["~/Documents/New"]["data"] == "claude"
+
+
+def test_cycle_unknown_tier_still_resets_to_first():
+    c = cat()
+    c["folder_policy"]["~/Documents/X"] = {"tier": "ultra"}
+    tui.cycle_policy(c, "~/Documents/X", "tier")
+    assert c["folder_policy"]["~/Documents/X"]["tier"] == "pro"
+    c["folder_policy"]["~/Documents/Y"] = {}
+    tui.cycle_policy(c, "~/Documents/Y", "tier")
+    assert c["folder_policy"]["~/Documents/Y"]["tier"] == "flash"
