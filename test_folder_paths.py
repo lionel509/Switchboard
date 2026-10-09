@@ -287,5 +287,38 @@ def test_nested_null_or_empty_data_inherits(monkeypatch):
         assert level(H + "/Documents/Private/x") == "any", v
 
 
+P3 = {"data": "claude", "tier": "plan", "effort": "xhigh"}
+
+
+def trio(pol):
+    return (r.data_level(pol["data"]), pol["tier"], pol["effort"])
+
+
+def test_alias_row_above_private_keeps_private_keys(tmp_path, monkeypatch):
+    (tmp_path / "Private" / "sub").mkdir(parents=True)
+    (tmp_path / "Work").mkdir()
+    os.symlink(tmp_path / "Private" / "sub", tmp_path / "Work" / "Link")
+    for work in ({"data": "any", "effort": "low"},
+                 {"data": "claude", "tier": "flash", "effort": "low"}):
+        use(monkeypatch, {str(tmp_path / "Private"): P3, str(tmp_path / "Work"): work})
+        pol = r.policy_for(str(tmp_path / "Work" / "Link" / "x"))
+        assert trio(pol) == ("claude", "plan", "xhigh"), work
+
+
+def test_link_out_of_private_keeps_private_keys(tmp_path, monkeypatch):
+    (tmp_path / "Private").mkdir()
+    (tmp_path / "Work" / "sub").mkdir(parents=True)
+    os.symlink(tmp_path / "Work" / "sub", tmp_path / "Private" / "link")
+    cases = (
+        ({str(tmp_path / "Private"): P3, str(tmp_path / "Work"): {"data": "any", "effort": "low"}}, DEFAULT),
+        ({str(tmp_path): {"data": "any", "effort": "low"}, str(tmp_path / "Private"): P3}, DEFAULT),
+        ({str(tmp_path / "Private"): P3}, {"data": "claude", "tier": "pro", "effort": "medium"}),
+    )
+    for rows, default in cases:
+        use(monkeypatch, rows, default)
+        pol = r.policy_for(str(tmp_path / "Private" / "link" / "x"))
+        assert trio(pol) == ("claude", "plan", "xhigh"), rows
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main(["-q", "-p", "no:cacheprovider", __file__]))

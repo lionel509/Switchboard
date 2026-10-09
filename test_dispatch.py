@@ -580,3 +580,41 @@ def test_run_dir_dotdot_after_symlink_keeps_folder_policy(monkeypatch, tmp_path)
     h.quota_queue = [QUOTA_OUT]
     assert d.run(h.args) == 2
     assert h.models_called() == []
+
+def test_run_dir_link_dotdot_never_reaches_private(monkeypatch, tmp_path):
+    h = RunHarness(monkeypatch, tmp_path)
+    (tmp_path / "Private" / "x").mkdir(parents=True)
+    (tmp_path / "Elsewhere" / "deep").mkdir(parents=True)
+    os.symlink(tmp_path / "Elsewhere" / "deep", tmp_path / "Link")
+    monkeypatch.setattr(d.router, "POLICY", {str(tmp_path / "Private"): {"data": "claude"}})
+    h.args.dir = str(tmp_path / "Link" / ".." / "Private" / "x")
+    h.args.from_ = "antigravity"
+    h.quota_queue = [QUOTA_OUT]
+    assert d.run(h.args) == 1
+    assert h.calls == []
+
+
+def test_run_reads_policy_for_the_folder_it_runs_in(monkeypatch, tmp_path):
+    spells = ["Other/link/../x", "Link/../Private/x", "Other/link",
+              "Private/out/../x", "Private/out"]
+    for i, spell in enumerate(spells):
+        base = tmp_path / str(i)
+        for sub in ("Private/sub", "Private/x", "Other/x", "Elsewhere/deep",
+                    "Elsewhere/Private/x", "outdir", "x"):
+            (base / sub).mkdir(parents=True)
+        os.symlink(base / "Private" / "sub", base / "Other" / "link")
+        os.symlink(base / "Elsewhere" / "deep", base / "Link")
+        os.symlink(base / "outdir", base / "Private" / "out")
+        h = RunHarness(monkeypatch, base)
+        looked = []
+        real_policy_for = d.router.policy_for
+        monkeypatch.setattr(d.router, "policy_for",
+                            lambda c, f=real_policy_for: (looked.append(c), f(c))[1])
+        h.args.dir = str(base / spell)
+        h.args.from_ = "antigravity"
+        assert d.run(h.args) == 0, spell
+        agy = [a for a in h.calls if a[0] == TEST_DISPATCH_CFG["agy"] and "/quota" not in a]
+        assert os.path.realpath(looked[0]) == agy[0][agy[0].index("--add-dir") + 1], spell
+        monkeypatch.setattr(d.router, "policy_for", real_policy_for)
+
+
