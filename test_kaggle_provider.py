@@ -9,9 +9,12 @@ H = os.path.expanduser("~")
 KAGGLE = [m["id"] for m in r.CANDIDATES if m["id"].startswith("kaggle/")]
 
 
-def test_private_folders_refuse_every_kaggle_model():
+def test_private_folders_refuse_every_kaggle_model(monkeypatch):
+    monkeypatch.setattr(r, "POLICY", {"_default": {"data": "any"},
+                                      "~/Documents/State Street": {"data": "zdr"},
+                                      "~/Documents/Private": {"data": "claude"}})
     assert KAGGLE
-    for folder in ("State Street", "Vanguard"):
+    for folder in ("State Street", "Private"):
         pol = r.policy_for(H + "/Documents/" + folder)
         assert not any(r.allowed(m, pol) for m in KAGGLE), folder
 

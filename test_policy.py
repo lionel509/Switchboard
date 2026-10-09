@@ -4,7 +4,7 @@
 Run: python3 test_policy.py     (silent means pass)
 
 Every case below fails loudly if the rail stops holding -- the point is that a
-real Vanguard path with a real third-party model id comes back refused, not that
+real private-vault path with a real third-party model id comes back refused, not that
 the functions merely run.
 """
 import importlib.util, os, sys
@@ -15,7 +15,7 @@ r = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(r)
 
 HOME = os.path.expanduser("~")
-VANGUARD = HOME + "/Documents/Vanguard"
+PRIVATE = HOME + "/Documents/Private"
 STATE = HOME + "/Documents/State Street"
 BLACKROCK = HOME + "/Documents/BlackRock"
 
@@ -24,18 +24,23 @@ BODY = ('{"model":"x","messages":[{"role":"user","content":"<system-reminder>\\n
         '# Environment\\nYou have been invoked in the following environment: \\n'
         ' - Primary working directory: %s\\n - Is a git repository: true\\n'
         '</system-reminder>"}]}')
-assert r.cwd_of((BODY % VANGUARD).encode()) == VANGUARD, r.cwd_of((BODY % VANGUARD).encode())
+assert r.cwd_of((BODY % PRIVATE).encode()) == PRIVATE, r.cwd_of((BODY % PRIVATE).encode())
 assert r.cwd_of(b'{"model":"x"}') == "", "no Environment block must yield no cwd"
 assert r.cwd_of(b"") == ""
 
+# Built in-test so no assert depends on the real catalog's folder rows.
+r.POLICY = {"_default": {"data": "any", "tier": "pro"},
+            "~/Documents/Private": {"data": "claude"},
+            "~/Documents/State Street": {"data": "zdr"}}
+
 # --- longest-prefix matching ------------------------------------------------
-assert r.policy_for(VANGUARD)["data"] == "claude"
-assert r.policy_for(VANGUARD + "/entities")["data"] == "claude", "subfolder inherits"
+assert r.policy_for(PRIVATE)["data"] == "claude"
+assert r.policy_for(PRIVATE + "/notes")["data"] == "claude", "subfolder inherits"
 assert r.policy_for(STATE)["data"] == "zdr"
 assert r.policy_for(BLACKROCK)["data"] == "any", "unlisted folder gets _default"
 assert r.policy_for("")["data"] == "any", "unknown cwd gets _default"
 # A sibling whose name merely starts the same must NOT match.
-assert r.policy_for(HOME + "/Documents/VanguardNotes")["data"] == "any"
+assert r.policy_for(HOME + "/Documents/PrivateNotes")["data"] == "any"
 
 # --- the rail itself --------------------------------------------------------
 CLAUDE_ONLY = {"data": "claude"}
@@ -46,7 +51,7 @@ ANY = {"data": "any"}
 assert r.allowed("claude-sonnet-5", CLAUDE_ONLY)
 assert r.allowed("claude-sonnet-5", ZDR)
 
-# Vanguard: nothing but Claude. These are the cases that matter.
+# The private vault: nothing but Claude. These are the cases that matter.
 assert not r.allowed("kimi/k2.8", CLAUDE_ONLY), "vendor plan must be refused"
 assert not r.allowed("qwen/qwen3.8-flash", CLAUDE_ONLY)
 assert not r.allowed("x-ai/grok-4.7", CLAUDE_ONLY), "even a ZDR route is still third party"
