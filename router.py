@@ -926,6 +926,8 @@ def maybe_fetch_quota(upstream):
 # last attempt in a chain is never skipped. Settings live under a top-level
 # `limits` key in models.json; the defaults below apply when it is absent, and a
 # change needs a router restart (the catalog loads once, see load_catalog()).
+# a value that isn't a finite number >= 0 uses the default; null turns off only
+# fallback_cash_per_day and worker_shift_pct
 LIMIT_DEFAULTS = {
     # a limits file older than this is ignored
     "stale_minutes": 15,
@@ -947,7 +949,17 @@ LIVE = {}                          # head model -> {"model": served, "ts": ...}
 
 
 def limit_setting(name):
-    return (CATALOG.get("limits") or {}).get(name, LIMIT_DEFAULTS[name])
+    lim = CATALOG.get("limits")
+    if not isinstance(lim, dict) or name not in lim:
+        return LIMIT_DEFAULTS[name]
+    v = lim[name]
+    if name == "gate":
+        return v if isinstance(v, dict) else LIMIT_DEFAULTS["gate"]
+    if v is None and name in ("fallback_cash_per_day", "worker_shift_pct"):
+        return None
+    if _num(v) and 0 <= v < float("inf"):
+        return v
+    return LIMIT_DEFAULTS[name]
 
 
 def _num(v):
@@ -1042,7 +1054,9 @@ def mark_429(model, resp, now=None):
 def fallback_spent_today():
     """Sum of cost over today's fallback rows (failover_from set). The ledger's ts
     is local time, so today is the local date. Finite positive numeric costs only.
-    Uncached: a scan is about 0.04 s, and a cache would hide spend made inside it."""
+    Uncached: a scan is about 0.04 s, and a cache would hide spend made inside it.
+    The cap is checked, not reserved: metered fallbacks already in flight can each
+    pass it, so it can overshoot by their cost (follow-up A, see PR #57 Known limits)."""
     today = time.strftime("%Y-%m-%d")
     total = 0.0
     try:
@@ -1628,8 +1642,9 @@ class Router(BaseHTTPRequestHandler):
         a 429 on the first choice can be abandoned silently. Once streaming
         starts there is no going back, which is why failover is status-based and
         never mid-stream. A transport error only fails over to a plan-billed model.
-        A fresh limit file or a remembered 429 skips a non-final attempt before it
-        is sent (#56); the last attempt is always tried.
+        A fresh limit file, a remembered 429 or the fallback cash cap skips a non-final
+        attempt before it is sent (#56). The last attempt is never skipped, but the walk
+        can still end before it: a transport error stops at the next metered hop (#1).
         """
         t0 = time.time()
         resp = conn = None
@@ -1668,6 +1683,9 @@ class Router(BaseHTTPRequestHandler):
                                  "not buying the turn per token" % failed_host)
             if i and _num(cash_cap) and metered(att["model"]):
                 spent = fallback_spent_today()
+                if spent >= cash_cap and not last:
+                    skipped[att["model"]] = "cash cap $%.2f of $%.2f" % (spent, cash_cap)
+                    continue
                 if spent >= cash_cap:
                     rec.update(status=403, error="fallback cash cap: $%.2f of $%.2f today"
                                % (spent, cash_cap))
