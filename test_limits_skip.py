@@ -431,3 +431,42 @@ def test_invariants_random(tmp_path, monkeypatch):
         assert calls or fails, ctx
         assert (fails or calls[-1] == models[-1]
                 or outcomes[calls[-1]] not in FAILOVER), ctx
+
+
+# --- round 1 review (PR #57) ----------------------------------------------
+
+def test_pct_just_under_100_does_not_skip():
+    write_limits("anthropic", claude_snapshot(seven=99.9))
+    calls, _ = run({HAIKU: 200}, chain=[(HAIKU, "anthropic"), (KIMI, "kimi")])
+    assert calls == [HAIKU]
+
+
+def test_file_skip_refreshes_quota_but_429_skip_does_not(monkeypatch):
+    fetched = []
+    monkeypatch.setattr(r, "maybe_fetch_quota", fetched.append)
+    r.SKIP_UNTIL[HAIKU] = time.time() + 3600
+    write_limits("kimi", kimi_snapshot(code=100))
+    calls, _ = run({MIMO: 200}, chain=[(HAIKU, "anthropic"), (KIMI, "kimi"), (MIMO, "openrouter")])
+    assert calls == [MIMO]
+    assert "kimi" in fetched
+    assert "anthropic" not in fetched
+
+
+def test_skipped_hop_does_not_take_a_turn(monkeypatch):
+    taken = []
+    monkeypatch.setattr(r, "take_turn", lambda m: taken.append(m) or True)
+    r.SKIP_UNTIL[HAIKU] = time.time() + 3600
+    calls, _ = run({KIMI: 200}, chain=[(HAIKU, "anthropic"), (KIMI, "kimi")])
+    assert calls == [KIMI]
+    assert taken == [KIMI]
+
+
+@pytest.mark.parametrize("v", [float("inf"), float("nan"), "1792080000000"])
+def test_to_epoch_rejects_non_finite_and_ms(v):
+    assert r.to_epoch(v) is None
+
+
+def test_infinite_reset_in_file_does_not_crash():
+    write_limits("kimi", '{"ts": "%s", "five_hour_pct": 100, '
+                         '"five_hour_resets_at": Infinity}' % now_iso())
+    assert r.skip_reason(KIMI, "kimi") is None
