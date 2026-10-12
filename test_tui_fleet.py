@@ -686,8 +686,8 @@ class FakeScr:
         return ["".join(r) for r in self.g]
 
 
-def drawn(width, height=40):
-    u = fleet_ui(0)
+def drawn(width, height=40, page=0):
+    u = fleet_ui(page)
     u.band_on = True
     u.scr = FakeScr(height, width)
     u.draw()
@@ -765,12 +765,66 @@ def test_main_label_is_the_alias_of_the_main_model():
     assert joined(lines[-1]).startswith("main (opus)")
 
 
-def test_table_and_band_agree_on_the_tier_id():
-    c = fixture_cat()
+def real_shaped_cat():
+    """The live models.json shape: tiers that share one chain land on one band line."""
+    kimi_flash = ["kimi/k2.8", "xiaomi/mimo-v2.6-flash"]
+    kimi_pro = ["kimi/k2.8", "xiaomi/mimo-v2.6-pro"]
+    return {"failover_default": [], "models": [
+        {"id": "claude-haiku-5-5", "tier": "haiku", "billing": "subscription", "failover": kimi_flash},
+        {"id": "claude-sonnet-5", "tier": "sonnet", "billing": "subscription", "failover": kimi_flash},
+        {"id": "claude-sonnet-5-5", "tier": "sonnet", "billing": "subscription", "failover": kimi_flash},
+        {"id": "claude-fable-5-1", "tier": "fable", "billing": "subscription", "failover": kimi_pro},
+        {"id": "claude-opus-5", "tier": "opus", "billing": "subscription", "failover": kimi_pro},
+        {"id": "claude-opus-5-5", "tier": "opus", "billing": "subscription", "failover": kimi_pro},
+        {"id": "kimi/k2.8", "billing": "subscription"},
+        {"id": "xiaomi/mimo-v2.6-flash", "price": [0.1, 0.3]},
+        {"id": "xiaomi/mimo-v2.6-pro", "price": [0.2, 0.6]}]}
+
+
+@pytest.mark.parametrize("tier,expect", [("haiku", "claude-haiku-5-5"), ("sonnet", "claude-sonnet-5-5"),
+                                         ("fable", "claude-fable-5-1"), ("opus", "claude-opus-5-5")])
+def test_tier_chain_names_the_tiers_own_last_listed_id(tier, expect):
+    assert tui.tier_chain(real_shaped_cat(), tier)[0] == expect
+
+
+def test_fleet_block_haiku_row_names_the_haiku_id():
+    block = tui.fleet_block(real_shaped_cat(), [("breaker", "haiku")], "opus")
+    row = next(l for l in block.splitlines() if l.startswith("| breaker |"))
+    assert row.split("|")[-2].strip().startswith("claude-haiku-5-5 \u2192 ")
+
+
+def test_breaker_table_names_own_tier_when_tiers_share_a_chain():
+    cat = {"failover_default": ["kimi/k2.8", "xiaomi/mimo-v2.6-pro"],
+           "models": [{"id": "claude-opus-5-5", "tier": "opus", "billing": "subscription"},
+                      {"id": "claude-haiku-5-5", "tier": "haiku", "billing": "subscription"},
+                      {"id": "kimi/k2.8", "billing": "subscription"},
+                      {"id": "xiaomi/mimo-v2.6-pro", "price": [0.2, 0.6]}]}
+    chain = tui.tier_chain(cat, "opus")
+    assert chain[0] == "claude-opus-5-5", chain
+
+
+@pytest.mark.parametrize("c", [fixture_cat(), real_shaped_cat()])
+def test_table_and_band_agree_on_the_tier_id(c):
     block = tui.fleet_block(c, [("planner", "opus")], "opus")
     row = [l for l in block.splitlines() if l.startswith("| planner |")][0]
-    first = row.split("|")[-2].strip().split(" → ")[0]
+    first = row.split("|")[-2].strip().split(" \u2192 ")[0]
     group_heads = next(h for h, t in tui.chain_groups(c) if first in h)
-    assert first == group_heads[-1] == "claude-opus-5-5"
+    assert first == "claude-opus-5-5"
+    assert first in group_heads and tui.tier_of(c, first) == "opus"
     band = " ".join(t for line in tui.band_lines(c, {}, [], "opus", 0) for t, _ in line)
-    assert "opus-5·opus-5-5" in band
+    assert "opus-5\u00b7opus-5-5" in band
+
+
+def test_fit_head_drops_whole_parts_then_ellipsis():
+    assert tui.fit_head("aa  \u00b7  bbbb", 3) == "aa"
+    assert tui.fit_head("aa  \u00b7  bbbb", 20) == "aa  \u00b7  bbbb"
+    assert tui.fit_head("abcdefgh", 5) == "abcd\u2026"
+
+
+@pytest.mark.parametrize("w", WIDTHS)
+def test_fleet_header_is_never_cut_mid_word(w):
+    u = fleet_ui(5)
+    rows = drawn(w, page=5)
+    list_w = w - max(30, min(40, w // 3)) - 1 if w >= 92 else w
+    edge = list_w - 1
+    assert rows[2][3:edge].rstrip() == tui.fit_head(u.rows[0][1], edge - 3)
