@@ -13,7 +13,7 @@ Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
 and is stripped on both third-party paths — it never leaves this machine toward
 OpenRouter or a vendor endpoint.
 """
-import base64, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
+import base64, calendar, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -919,6 +919,188 @@ def maybe_fetch_quota(upstream):
         threading.Thread(target=fetch_quota, args=(upstream,), daemon=True).start()
 
 
+# --- limit-aware skip (#56) ---------------------------------------------------
+# Before each non-final attempt in relay(), three things can skip it: a 429 this
+# router remembered for a subscription model, a fresh limits file showing a gated
+# window full with its reset still ahead, or (opt-in) an early worker shift. The
+# last attempt in a chain is never skipped. Settings live under a top-level
+# `limits` key in models.json; the defaults below apply when it is absent, and a
+# change needs a router restart (the catalog loads once, see load_catalog()).
+# a value that isn't a finite number >= 0 uses the default; null turns off only
+# fallback_cash_per_day and worker_shift_pct
+LIMIT_DEFAULTS = {
+    # a limits file older than this is ignored
+    "stale_minutes": 15,
+    # how long a 429 with no Retry-After keeps a subscription model out of the walk
+    "cooloff_minutes": 15,
+    # per upstream, the _pct windows that skip when full. Kimi's month_pct is left
+    # out on purpose: the month total read 100 while kimi/k2.8 kept answering 200.
+    "gate": {"anthropic": ["five_hour_pct", "seven_day_pct"],
+             "kimi": ["five_hour_pct", "month_code_pct"]},
+    # metered fallbacks (chain index > 0) stop once today's spend reaches this, $
+    "fallback_cash_per_day": 5.0,
+    # worker models skip once anthropic seven_day_pct reaches this; null is off
+    "worker_shift_pct": None,
+}
+WORKER_PREFIXES = ("claude-haiku-", "claude-sonnet-")
+SKIP_UNTIL = {}                    # model -> epoch until which it stays out
+SKIP_LOCK = threading.Lock()
+LIVE = {}                          # head model -> {"model": served, "ts": ...}
+
+
+def limit_setting(name):
+    lim = CATALOG.get("limits")
+    if not isinstance(lim, dict) or name not in lim:
+        return LIMIT_DEFAULTS[name]
+    v = lim[name]
+    if name == "gate":
+        if not isinstance(v, dict):
+            return LIMIT_DEFAULTS["gate"]
+        out = {}
+        for up, keys in v.items():
+            if isinstance(keys, (list, tuple)) and all(
+                    isinstance(k, str) and k.endswith("_pct") for k in keys):
+                out[up] = list(keys)
+            elif up in LIMIT_DEFAULTS["gate"]:
+                out[up] = LIMIT_DEFAULTS["gate"][up]
+        return out
+    if v is None and name in ("fallback_cash_per_day", "worker_shift_pct"):
+        return None
+    if _num(v) and 0 <= v < float("inf"):
+        return v
+    return LIMIT_DEFAULTS[name]
+
+
+def _num(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool)
+
+
+def _iso(t):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+
+
+def limits_file(upstream):
+    if upstream == "anthropic":
+        return os.path.join(os.path.dirname(LOGFILE), "rate-limits.json")
+    return quota_file(upstream)
+
+
+def to_epoch(v):
+    """A reset or ts as epoch seconds. The status line writes epoch strings, the
+    kimi file writes ISO-8601 UTC. None when missing, unreadable, non-finite, or
+    outside [0, 1e11) (a millisecond epoch lands far past that)."""
+    try:
+        if _num(v):
+            t = float(v)
+        elif isinstance(v, str) and v.strip():
+            s = v.strip()
+            if s.isascii() and s.replace(".", "", 1).isdigit():
+                t = float(s)
+            else:
+                t = float(calendar.timegm(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")))
+        else:
+            return None
+    except (ValueError, OverflowError):
+        return None
+    return t if 0 <= t < 1e11 else None
+
+
+def read_limits(upstream, now):
+    """The limits file for an upstream if it parses and is fresh, else None."""
+    try:
+        with open(limits_file(upstream)) as f:
+            d = json.load(f)
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(d, dict):
+        return None
+    ts = to_epoch(d.get("ts"))
+    if ts is None or abs(now - ts) > limit_setting("stale_minutes") * 60:
+        return None
+    return d
+
+
+def skip_reason(model, upstream, now=None):
+    """Why a non-final attempt is not sent, or None to send it."""
+    now = time.time() if now is None else now
+    with SKIP_LOCK:
+        until = SKIP_UNTIL.get(model, 0)
+    if until > now:
+        return "429 until %s" % _iso(until)
+    d = read_limits(upstream, now)
+    if d is None:
+        return None
+    for k in (limit_setting("gate") or {}).get(upstream) or []:
+        if not k.endswith("_pct"):
+            continue
+        pct = d.get(k)
+        reset = to_epoch(d.get(k[:-4] + "_resets_at"))
+        if _num(pct) and pct >= 100 and reset and reset > now:
+            return "%s %s=%s until %s" % (upstream, k, pct, _iso(reset))
+    shift = limit_setting("worker_shift_pct")
+    if (upstream == "anthropic" and _num(shift) and model.startswith(WORKER_PREFIXES)
+            and _num(d.get("seven_day_pct")) and d["seven_day_pct"] >= shift):
+        return "worker shift: seven_day_pct=%s >= %s" % (d["seven_day_pct"], shift)
+    return None
+
+
+def mark_429(model, resp, now=None):
+    """Keep a subscription model out of the walk for its Retry-After, or the
+    cool-off when none is sent. Metered models are never remembered: their 429 is
+    a rate limit on a pay-per-token route, not a pool that refills."""
+    if metered(model):
+        return
+    now = time.time() if now is None else now
+    ra = resp.getheader("retry-after")
+    if (isinstance(ra, str) and ra.strip().isascii() and ra.strip().isdigit()
+            and len(ra.strip()) <= 7):
+        secs = int(ra.strip())
+    else:
+        secs = limit_setting("cooloff_minutes") * 60
+    with SKIP_LOCK:
+        SKIP_UNTIL[model] = now + min(secs, 8 * 86400)
+
+
+def fallback_spent_today():
+    """Sum of cost over today's fallback rows (failover_from set). The ledger's ts
+    is local time, so today is the local date. Finite positive numeric costs only.
+    Uncached: a scan is about 0.04 s, and a cache would hide spend made inside it.
+    The cap is checked, not reserved: metered fallbacks already in flight can each
+    pass it, so it can overshoot by their cost (#60)."""
+    today = time.strftime("%Y-%m-%d")
+    total = 0.0
+    try:
+        with open(LOGFILE, "rb") as f:
+            for line in f:
+                if b'"failover_from"' not in line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except (ValueError, RecursionError):
+                    continue
+                if (isinstance(rec, dict) and str(rec.get("ts", ""))[:10] == today
+                        and _num(rec.get("cost")) and 0 < rec["cost"] < float("inf")):
+                    total += rec["cost"]
+    except OSError:
+        total = 0.0
+    return round(total, 6)
+
+
+def note_live(head, served):
+    """Record which model is serving a tier, so a degraded run is visible."""
+    with SKIP_LOCK:
+        if LIVE.get(head, {}).get("model") == served:
+            return
+        LIVE[head] = {"model": served, "ts": _iso(time.time())}
+        path = os.path.join(os.path.dirname(LOGFILE), "live-upstreams.json")
+        try:
+            with open(path + ".tmp", "w") as f:
+                f.write(json.dumps(LIVE) + "\n")
+            os.replace(path + ".tmp", path)
+        except OSError:
+            pass
+
+
 # --- Messages <-> chat completions (wire: openai providers) -----------------
 
 def _text(content):
@@ -1470,10 +1652,15 @@ class Router(BaseHTTPRequestHandler):
         a 429 on the first choice can be abandoned silently. Once streaming
         starts there is no going back, which is why failover is status-based and
         never mid-stream. A transport error only fails over to a plan-billed model.
+        A fresh limit file, a remembered 429 or the fallback cash cap skips a non-final
+        attempt before it is sent (#56). The last attempt is never skipped, but the walk
+        can still end before it: a transport error stops at the next metered hop (#1).
         """
         t0 = time.time()
         resp = conn = None
         att = prepared[0]
+        skipped, no_cash, failed_host = {}, False, None
+        cash_cap = limit_setting("fallback_cash_per_day")
         for i, att in enumerate(prepared):
             last = (i == len(prepared) - 1)
             rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -1490,6 +1677,34 @@ class Router(BaseHTTPRequestHandler):
                 rec["effort"] = att["effort"]
             if i:
                 rec["failover_from"] = prepared[i - 1]["model"]
+            if skipped:
+                rec["skipped"] = dict(skipped)
+            if not last:
+                why = skip_reason(att["model"], att["upstream"])
+                if why:
+                    skipped[att["model"]] = why
+                    if not why.startswith("429"):
+                        maybe_fetch_quota(att["upstream"])   # keeps kimi-limits.json fresh
+                    continue
+            if no_cash and metered(att["model"]):
+                rec.update(status=502, error="transport error; not moving onto a metered model")
+                log_request(rec)
+                return self.fail(502, "upstream %s failed and the next live route is metered; "
+                                 "not buying the turn per token" % failed_host)
+            if i and _num(cash_cap) and metered(att["model"]):
+                spent = fallback_spent_today()
+                if spent >= cash_cap and not last:
+                    skipped[att["model"]] = "cash cap $%.2f of $%.2f" % (spent, cash_cap)
+                    continue
+                if spent >= cash_cap:
+                    rec.update(status=403, error="fallback cash cap: $%.2f of $%.2f today"
+                               % (spent, cash_cap))
+                    log_request(rec)
+                    return self.fail(403, "Switchboard fallback cash cap reached: $%.2f spent "
+                                     "today on metered fallbacks (cap $%.2f, models.json "
+                                     "limits.fallback_cash_per_day). Not rolling onto anything "
+                                     "else; wait for the subscription reset or raise the cap."
+                                     % (spent, cash_cap))
             if not take_turn(att["model"]):
                 rec.update(status=429, error="turn cap: %s/h" % turn_cap(att["model"]))
                 log_request(rec)
@@ -1498,6 +1713,7 @@ class Router(BaseHTTPRequestHandler):
                                      "models.json turn_caps). Wait, or pick a plan model."
                                      % (att["model"], turn_cap(att["model"])))
                 continue
+            no_cash = False          # a non-metered hop is now being tried
             try:
                 conn, resp = self.issue(method, att, rec)
             except Exception as e:
@@ -1508,11 +1724,16 @@ class Router(BaseHTTPRequestHandler):
                 # This branch used to continue unconditionally: $3.11 on 2026-09-16.
                 if last or metered(prepared[i + 1]["model"]):
                     return self.fail(502, "upstream %s: %s" % (att["host"], e))
+                # Skipped hops can sit between this and the next metered one, so the
+                # cash rule carries forward until a non-metered hop is actually tried.
+                no_cash, failed_host = True, att["host"]
                 continue
             if resp.status in FAILOVER_STATUSES and not last:
                 rec.update(status=resp.status, failed_over_to=prepared[i + 1]["model"],
                            ms=int((time.time() - t0) * 1000))
                 log_request(rec)
+                if resp.status == 429:
+                    mark_429(att["model"], resp)
                 maybe_fetch_quota(att["upstream"])
                 try:
                     resp.read()          # drain so the socket can be closed cleanly
@@ -1588,6 +1809,8 @@ class Router(BaseHTTPRequestHandler):
         if usage.get("cost") is not None:
             rec["cost"] = usage["cost"]
         log_request(rec)
+        if isinstance(rec.get("status"), int) and rec["status"] < 400:
+            note_live(prepared[0]["model"], model)
         maybe_fetch_quota(upstream)
 
         self.log_message("%s %s -> %s %s (%dms%s)", rec["status"], model or path,
