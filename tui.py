@@ -468,7 +468,7 @@ def read_live(path):
     try:
         with open(path) as f:
             d = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     if not isinstance(d, dict):
         return {}
@@ -572,7 +572,7 @@ def read_prefs(path):
     try:
         with open(path) as f:
             d = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return {}
     return d if isinstance(d, dict) else {}
 
@@ -588,12 +588,22 @@ def write_prefs(path, prefs):
 def _frontmatter(text):
     """(lines, index of the closing fence) for a leading ---fenced block, else None."""
     lines = text.splitlines(keepends=True)
-    if not lines or lines[0].lstrip("﻿").rstrip("\r\n") != "---":
+    if not lines or lines[0].lstrip("\ufeff").rstrip("\r\n") != "---":
         return None
     for i in range(1, len(lines)):
         if lines[i].rstrip("\r\n") == "---":
             return lines, i
     return None
+
+
+_INLINE_COMMENT = re.compile(r"(?:^|(?<=\s))#")
+
+
+def _split_value(value):
+    """(value, comment): the YAML value and its inline comment, which starts at a
+    '#' at the start or after whitespace. The comment keeps its own spacing."""
+    m = _INLINE_COMMENT.search(value)
+    return (value, "") if m is None else (value[:m.start()], value[m.start():])
 
 
 def _model_of(text):
@@ -603,7 +613,8 @@ def _model_of(text):
     lines, close = fm
     for line in lines[1:close]:
         if line.startswith("model:"):
-            return line[len("model:"):].strip().strip("\"'")
+            head, _ = _split_value(line[len("model:"):])
+            return head.strip().strip("\"'")
     return ""
 
 
@@ -643,8 +654,13 @@ def set_model_line(text, alias):
     lines, close = fm
     for i in range(1, close):
         if lines[i].startswith("model:"):
-            end = lines[i][len(lines[i].rstrip("\r\n")):]
-            lines[i] = "model: %s%s" % (alias, end)
+            body = lines[i][:len(lines[i].rstrip("\r\n"))]
+            end = lines[i][len(body):]
+            value = body[len("model:"):]
+            head, comment = _split_value(value)
+            lead = value[:len(value) - len(value.lstrip())]
+            gap = head[len(head.rstrip()):]          # spacing before the comment, kept as written
+            lines[i] = "model:%s%s%s%s%s" % (lead, alias, gap, comment, end)
             return "".join(lines)
     end = lines[close][len("---"):] or "\n"
     lines.insert(close, "model: %s%s" % (alias, end))
