@@ -1046,7 +1046,7 @@ SNIFF_LIMIT = 8192
 
 
 def sniff_403(att, resp):
-    """(body, quota) for a Kimi 403; (None, False) for every other response.
+    """(body, quota, broken) for a Kimi 403; (None, False, False) otherwise.
 
     Kimi Code says "out of quota" with a 403 and a plain-text "usage limit"
     line, not a 429. Only that upstream, only that wording; a 401/403 from
@@ -1054,18 +1054,18 @@ def sniff_403(att, resp):
     is small and not streamed, so relay() can forward the same bytes. (#68)
     """
     if resp.status != 403 or att.get("upstream") != "kimi":
-        return None, False
+        return None, False, False
     n = resp.getheader("content-length")
     if n is None or not str(n).isdigit() or int(n) > SNIFF_LIMIT:
-        return None, False
+        return None, False, False
     try:
         body = resp.read()
     except Exception:
-        # Truncated mid-body: the text is unknown. Treat it as quota so the walk
-        # can move on; quota_moves still limits that to plan-billed hops. (#68)
-        return None, True
+        # Truncated mid-body: the text is unknown, so it is never quota (a
+        # credential 403 must not drain another plan). relay() answers 502. (#68)
+        return None, False, True
     text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
-    return body, bool(KIMI_QUOTA_403.search(text))
+    return body, bool(KIMI_QUOTA_403.search(text)), False
 
 
 def metered(model):
@@ -1536,7 +1536,16 @@ class Router(BaseHTTPRequestHandler):
                 if last or metered(prepared[i + 1]["model"]):
                     return self.fail(502, "upstream %s: %s" % (att["host"], e))
                 continue
-            body, quota = sniff_403(att, resp)
+            body, quota, broken = sniff_403(att, resp)
+            if broken:
+                rec.update(status=502, error="403 body unreadable",
+                           ms=int((time.time() - t0) * 1000))
+                log_request(rec)
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                return self.fail(502, "upstream %s: 403 body truncated" % att["host"])
             if body is not None:
                 rec["error"] = gemma_error_text(body)     # what the 403 said (#68)
             # A quota 403 counts as a 429 only where the walk can go on to a
