@@ -424,6 +424,8 @@ def fleet_ui(page=5):
     u.page = page
     u.agents = AGENTS
     u.live = {}
+    u.frame = 0
+    u.band_on = True
     u.rebuild()
     return u
 

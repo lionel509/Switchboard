@@ -501,15 +501,18 @@ def tier_of(cat, model):
 
 
 def tier_chain(cat, model):
-    """[head id, *chain] of the first catalog row in this model's tier that has a chain."""
+    """[newest head id, *chain] for this model's tier: the last id of the band line the
+    tier's first row with a chain sits on, so the table names what the band shows."""
     tier = tier_of(cat, model)
     if tier is None:
         return []
+    groups = chain_groups(cat)
     for m in _models(cat):
         if m.get("tier") == tier:
-            chain = chain_for(cat, m.get("id"))
+            chain = chain_for(cat, m["id"])
             if chain:
-                return [m["id"]] + chain
+                heads = next((h for h, t in groups if t == chain and m["id"] in h), [m["id"]])
+                return [heads[-1]] + chain
     return []
 
 
@@ -517,28 +520,71 @@ def _short(mid):
     return mid[len("claude-"):] if mid.startswith("claude-") else mid
 
 
-def band_lines(cat, live, agents, main, frame):
+def _clip(text, n):
+    """text, or its first n-1 characters and an ellipsis when it is longer than n."""
+    if len(text) <= n:
+        return text
+    return text[:max(0, n - 1)] + "…" if n > 0 else ""
+
+
+def _shrink(labels, budget):
+    """Shorten the longest label, one cell at a time, until the labels fit the budget."""
+    labels = list(labels)
+    while sum(len(l) for l in labels) > budget:
+        i = max(range(len(labels)), key=lambda k: len(labels[k]))
+        if len(labels[i]) <= 4:
+            break
+        labels[i] = _clip(labels[i], len(labels[i]) - 1)
+    return labels
+
+
+def _wrap_units(units, width):
+    """Pack units (each a list of segments) into rows of `width`. A unit is never split."""
+    rows, row, used = [], [], 0
+    for unit in units:
+        n = sum(len(t) for t, _ in unit)
+        if row and used + n > width:
+            rows.append(row)
+            row, used = [("  ", "rule")], 2
+        row = row + unit
+        used += n
+    if row:
+        rows.append(row)
+    return rows
+
+
+def _main_alias(main):
+    """The main model as its alias (opus[1m] -> opus); anything else is shown as it is."""
+    main = main or ""
+    return next((a for a in ALIASES if a in main), main or "?")
+
+
+def band_lines(cat, live, agents, main, frame, width=None):
     """The band: one line per distinct chain, then the spawn tree. Each line is a
-    list of (text, role) segments for putsegs()."""
+    list of (text, role) segments for putsegs(). With `width`, every line fits in it:
+    chain labels shorten with an ellipsis, and the tree wraps onto more rows."""
     lines = []
     groups = chain_groups(cat)
     if not groups:
-        lines.append([(BAND_NOTE, "note")])
+        lines.append([(BAND_NOTE if width is None else _clip(BAND_NOTE, width), "note")])
     for g, (heads, tail) in enumerate(groups):
         packet, pinned = packet_at(heads, tail, live, frame + g)
-        nodes = [("·".join(_short(h) for h in heads), any(hop_metered(cat, h) for h in heads))]
-        nodes += [(t, hop_metered(cat, t)) for t in tail]
+        labels = ["·".join(_short(h) for h in heads)] + list(tail)
+        metered = [any(hop_metered(cat, h) for h in heads)] + [hop_metered(cat, t) for t in tail]
+        if width is not None:
+            fixed = 4 * (len(labels) - 1) + 2 + 2 * sum(metered) + (6 if pinned else 0)
+            labels = _shrink(labels, width - fixed)
         segs = []
-        for k, (text, metered) in enumerate(nodes):
+        for k, (label, is_metered) in enumerate(zip(labels, metered)):
             if k:
                 lit = k <= packet
                 segs.append((" ━▶ " if lit else " ─▶ ", "sel" if lit else "rule"))
-            label = text + (" $" if metered else "")
+            text = label + (" $" if is_metered else "")
             if k == packet:
-                role = ("ok" if not metered else "bad") if pinned else "sel"
-                segs.append(((PINNED if pinned else PACKET) + " " + label, role))
+                role = ("ok" if not is_metered else "bad") if pinned else "sel"
+                segs.append(((PINNED if pinned else PACKET) + " " + text, role))
             else:
-                segs.append((label, "warn" if metered else ("id" if k == 0 else "note")))
+                segs.append((text, "warn" if is_metered else ("id" if k == 0 else "note")))
         if pinned:
             segs.append(("  LIVE", "warn"))
         lines.append(segs)
@@ -547,14 +593,33 @@ def band_lines(cat, live, agents, main, frame):
     for name, model in agents:
         by_model.setdefault(model or "?", []).append(name)
     models = sorted(by_model, key=lambda m: (order.get(m, 99), m))
-    tree = [("main (%s)" % (main or "main"), "head")]
+    units = [[("main (%s)" % _main_alias(main), "head")]]
     for gi, mdl in enumerate(models):
-        lit = gi == frame % len(models)
-        tree.append((" ⇢ ", "sel" if lit else "rule"))
-        tree.append(("%s (%s)" % ("·".join(sorted(by_model[mdl])), mdl), "id"))
-    tree.append(("   subagents can't spawn", "note"))
-    lines.append(tree)
+        label = "%s (%s)" % ("·".join(sorted(by_model[mdl])), mdl)
+        if width is not None:
+            label = _clip(label, max(10, width - 8))
+        units.append([(" ⇢ ", "sel" if gi == frame % len(models) else "rule"), (label, "id")])
+    units.append([("   subagents can't spawn", "note")])
+    if width is None:
+        lines.append([seg for unit in units for seg in unit])
+    else:
+        lines.extend(_wrap_units(units, width))
     return lines
+
+
+def fit_hints(pairs, width):
+    """The footer hints that fit in `width`. A hint is dropped whole, from the right;
+    the band hint (b) is never dropped."""
+    kept = list(pairs)
+
+    def cells(ps):
+        return sum(len(k) + 1 + len(l) for k, l in ps) + 5 * max(0, len(ps) - 1)
+    while cells(kept) > width:
+        idx = next((i for i in range(len(kept) - 1, -1, -1) if kept[i][0] != "b"), None)
+        if idx is None:
+            break
+        del kept[idx]
+    return kept
 
 
 def band_height(h, n_lines, band_on):
@@ -1025,6 +1090,16 @@ class UI(object):
             pass
         return x + len(text)
 
+    def _cell(self, y, x, text, a=0):
+        """Like put(), but may use the last column: panel borders end there."""
+        h, w = self.scr.getmaxyx()
+        if y < 0 or y >= h or x < 0 or x >= w:
+            return
+        try:
+            self.scr.addnstr(y, x, text, max(0, w - x), a)
+        except curses.error:
+            pass
+
     def putsegs(self, y, x, segs, force=None, right=None):
         for text, role in segs:
             if not text:
@@ -1039,13 +1114,13 @@ class UI(object):
         a = attr("sel" if active else "rule")
         if height < 2 or width < 4:
             return
-        self.put(top, left, "\u256d" + "\u2500" * (width - 2) + "\u256e", a)
+        self._cell(top, left, "\u256d" + "\u2500" * (width - 2) + "\u256e", a)
         if title:
             self.put(top, left + 2, " " + title + " ", attr("title" if active else "head"))
         for y in range(top + 1, top + height - 1):
-            self.put(y, left, "\u2502", a)
-            self.put(y, left + width - 1, "\u2502", a)
-        self.put(top + height - 1, left,
+            self._cell(y, left, "\u2502", a)
+            self._cell(y, left + width - 1, "\u2502", a)
+        self._cell(top + height - 1, left,
                  "\u2570" + "\u2500" * (width - 2) + "\u256f", a)
 
     def wrap(self, text, width):
@@ -1071,7 +1146,8 @@ class UI(object):
         if w >= 92:
             det_w = max(30, min(40, w // 3))
         list_w = w - det_w - (1 if det_w else 0)
-        lines = band_lines(self.cat, self.live, self.agents, self.primary, self.frame) if self.band_on else []
+        lines = band_lines(self.cat, self.live, self.agents, self.primary, self.frame,
+                           width=w - 4) if self.band_on else []
         band_h = band_height(h, len(lines), self.band_on)
         panel_h = h - 2 - band_h             # leave the footer row + a gap, and the band
         self._band_top = panel_h if band_h else h
@@ -1125,14 +1201,14 @@ class UI(object):
         # scroll position, drawn on the border so it costs no row
         if len(self.rows) > inner_h:
             frac = self.top / float(max(1, len(self.rows) - inner_h))
-            self.put(2 + int(frac * (inner_h - 1)), list_w - 1, "\u2503", attr("sel"))
+            self._cell(2 + int(frac * (inner_h - 1)), list_w - 1, "\u2503", attr("sel"))
 
         if det_w:
             self.detail(0, list_w + 1, panel_h, det_w)
         if band_h:
             self.box(panel_h, 0, band_h, w, "fallback chains \u00b7 spawn map", False)
             for i, segs in enumerate(lines):
-                self.putsegs(panel_h + 1 + i, 2, segs, right=w - 1)
+                self.putsegs(panel_h + 1 + i, 2, segs, right=w - 2)
 
         kind = self.current()[0]
         keys = {"menu": [("[ ]", "move"), ("enter", "start here"), ("d", "remove")],
@@ -1144,8 +1220,9 @@ class UI(object):
                       else [("enter", "sign in"), ("a", "add key"), ("l", "login")])
         if self.status:
             self.put(h - 2, 2, short(self.status, w - 4), attr("note"))
-        self.footer(h - 1, w, [("\u2190\u2192", "page"), ("\u2191\u2193", "move")] + keys
-                    + [("b", "hide band" if self.band_on else "show band"), ("s", "save all"), ("q", "quit")])
+        hints = [("\u2190\u2192", "page"), ("\u2191\u2193", "move")] + keys
+        hints += [("b", "hide band" if self.band_on else "show band"), ("s", "save all"), ("q", "quit")]
+        self.footer(h - 1, w, fit_hints(hints, w - 4))
         self.scr.refresh()
 
     def detail(self, top, left, height, width):
