@@ -141,7 +141,7 @@ def test_tier_chain_uses_first_row_of_the_tier():
     assert tui.tier_of(c, "claude-opus-5-5") == "opus"
     assert tui.tier_of(c, "kimi/k2.8") is None
     assert tui.tier_chain(c, "haiku") == ["claude-haiku-5-5", "kimi/k2.8", "xiaomi/mimo-v2.6-flash"]
-    assert tui.tier_chain(c, "claude-opus-5-5") == ["claude-opus-5", "kimi/k2.8", "xiaomi/mimo-v2.6-pro"]
+    assert tui.tier_chain(c, "claude-opus-5-5") == ["claude-opus-5-5", "kimi/k2.8", "xiaomi/mimo-v2.6-pro"]
     assert tui.tier_chain(c, "fable") == []
 
 
@@ -170,7 +170,7 @@ def test_band_lines_tree_is_always_last_and_groups_by_model():
     c = fixture_cat()
     lines = tui.band_lines(c, {}, AGENTS, "opus[1m]", 0)
     tree = joined(lines[-1])
-    assert tree.startswith("main (opus[1m])")
+    assert tree.startswith("main (opus)")
     assert "planner·reviewer (opus)" in tree
     assert "scout·sidekick·vault-reader (sonnet)" in tree
     assert "breaker·coder (haiku)" in tree
@@ -182,7 +182,7 @@ def test_band_lines_without_chains_says_so():
     lines = tui.band_lines({"models": [{"id": "x/y"}]}, {}, AGENTS, "", 0)
     assert "no fallback chains in models.json: every model fails instead" in joined(lines[0])
     assert "subagents can't spawn" in joined(lines[-1])
-    assert "main (main)" in joined(lines[-1])
+    assert "main (?)" in joined(lines[-1])
 
 
 def test_band_height_hides_on_short_terminals_and_when_toggled_off():
@@ -649,3 +649,126 @@ def test_break_empty_model_line_frontmatter_still_parses_as_model_haiku():
 def test_break_empty_model_line_crlf_keeps_space_after_colon():
     text = "---\r\nname: coder\r\nmodel:\r\n---\r\nbody\r\n"
     assert tui.set_model_line(text, "haiku") == "---\r\nname: coder\r\nmodel: haiku\r\n---\r\nbody\r\n"
+
+
+# --- polish round (PR #59 demo): rendering only -------------------------------
+
+class FakeScr:
+    """A screen that clips the way curses does: writes past the edge raise curses.error."""
+    def __init__(self, h, w):
+        self.h, self.w = h, w
+        self.g = [[" "] * w for _ in range(h)]
+
+    def getmaxyx(self):
+        return self.h, self.w
+
+    def erase(self):
+        self.g = [[" "] * self.w for _ in range(self.h)]
+
+    def clear(self):
+        pass
+
+    def refresh(self):
+        pass
+
+    def timeout(self, ms):
+        pass
+
+    def addnstr(self, y, x, text, n, a=0):
+        if not (0 <= y < self.h) or not (0 <= x < self.w):
+            raise tui.curses.error("out of bounds")
+        for i, ch in enumerate(text[:max(0, min(n, self.w - x))]):
+            self.g[y][x + i] = ch
+
+    def rows(self):
+        return ["".join(r) for r in self.g]
+
+
+def drawn(width, height=40):
+    u = fleet_ui(0)
+    u.band_on = True
+    u.scr = FakeScr(height, width)
+    u.draw()
+    return u.scr.rows()
+
+
+WIDTHS = [60, 61, 80, 91, 92, 120, 151, 200]
+
+
+@pytest.mark.parametrize("w", WIDTHS)
+def test_band_box_closes_on_the_right(w):
+    rows = drawn(w)
+    top = next(i for i, r in enumerate(rows) if "spawn map" in r)
+    bottom = next(i for i in range(top + 1, len(rows)) if rows[i][0] == "╰")
+    assert rows[top][0] == "╭" and rows[top][w - 1] == "╮"
+    assert rows[bottom][w - 1] == "╯"
+    for r in range(top + 1, bottom):
+        assert rows[r][0] == "│" and rows[r][w - 1] == "│", rows[r]
+
+
+@pytest.mark.parametrize("w", WIDTHS)
+def test_band_tree_is_never_cut_and_lines_fit(w):
+    rows = drawn(w)
+    top = next(i for i, r in enumerate(rows) if "spawn map" in r)
+    bottom = next(i for i in range(top + 1, len(rows)) if rows[i][0] == "╰")
+    text = " ".join(r[2:w - 2].strip() for r in rows[top + 1:bottom])
+    assert "subagents can't spawn" in text
+    for line in tui.band_lines(fixture_cat(), {}, AGENTS, "opus[1m]", 0, width=w - 4):
+        assert len("".join(t for t, _ in line)) <= w - 4
+
+
+def test_long_chain_label_is_shortened_with_an_ellipsis_not_cut():
+    c = {"failover_default": [], "models": [
+        {"id": "claude-haiku-5-5", "tier": "haiku", "failover": ["vendor/" + "x" * 70, "xiaomi/mimo-v2.6-pro"]},
+        {"id": "vendor/" + "x" * 70, "billing": "subscription"},
+        {"id": "xiaomi/mimo-v2.6-pro"}]}
+    line = tui.band_lines(c, {}, [], "opus", 0, width=56)[0]
+    text = "".join(t for t, _ in line)
+    assert len(text) <= 56 and "…" in text
+    assert "━▶" in text or "─▶" in text       # the arrows survive
+    assert text.rstrip().endswith("$")                             # the metered hop keeps its mark
+
+
+def test_tree_wraps_onto_a_second_row_when_it_does_not_fit():
+    lines = tui.band_lines(fixture_cat(), {}, AGENTS, "opus[1m]", 0, width=60)
+    assert len(lines) >= 5                 # three chain lines, then the tree on two rows
+    assert "subagents can't spawn" in joined(lines[-1])
+    assert "breaker·coder (haiku)" in "".join(joined(l) for l in lines)
+
+
+def test_footer_drops_hints_whole_from_the_right_and_keeps_band():
+    full = [("←→", "page"), ("↑↓", "move"), ("enter", "sign in"), ("a", "add key"),
+            ("l", "login"), ("b", "hide band"), ("s", "save all"), ("q", "quit")]
+    kept = tui.fit_hints(full, 40)
+    used = sum(len(k) + 1 + len(l) for k, l in kept) + 5 * (len(kept) - 1)
+    assert used <= 40
+    assert ("b", "hide band") in kept
+    assert kept == [h for h in full if h in kept]                  # order kept
+    assert ("q", "quit") not in kept                               # the right-most went first
+
+
+@pytest.mark.parametrize("w", WIDTHS)
+def test_footer_row_shows_whole_hints_only(w):
+    rows = drawn(w)
+    footer = rows[39].strip()
+    assert "hide band" in footer or "show band" in footer
+    for k, l in [("s", "save all"), ("q", "quit"), ("a", "add key"), ("enter", "sign in")]:
+        hint = "%s %s" % (k, l)
+        if hint[:6] in footer:
+            assert hint in footer, footer
+
+
+def test_main_label_is_the_alias_of_the_main_model():
+    lines = tui.band_lines(fixture_cat(), {}, AGENTS, "opus[1m]", 0)
+    assert joined(lines[-1]).startswith("main (opus)")
+
+
+def test_table_and_band_agree_on_the_tier_id():
+    c = fixture_cat()
+    block = tui.fleet_block(c, [("planner", "opus")], "opus")
+    row = [l for l in block.splitlines() if l.startswith("| planner |")][0]
+    first = row.split("|")[-2].strip().split(" → ")[0]
+    group_heads = next(h for h, t in tui.chain_groups(c) if first in h)
+    assert first == group_heads[-1] == "claude-opus-5-5"
+    band = " ".join(t for line in tui.band_lines(c, {}, [], "opus", 0) for t, _ in line)
+    assert "opus-5·opus-5-5" in band
