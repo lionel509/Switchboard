@@ -16,17 +16,19 @@ def ui(page):
     u.dirty, u.status, u.rows = False, "", []
     u.primary, u.new_primary, u.keyuse, u.spend = "opus[1m]", None, {"openrouter": None}, {"openrouter": {"requests": 1, "cost": 0.1, "failover_cost": 0, "refused": 0}}
     u.page = page
+    u.agents = [("coder", "haiku")]
     u.rebuild()
     return {k for k, _ in u.rows} - {"head", "blank", "note"}
 
 
 def test_each_page_shows_only_its_own_rows():
-    assert tui.PAGES == ["Providers", "Menu", "Models", "Policy", "Spend"]
+    assert tui.PAGES == ["Providers", "Menu", "Models", "Policy", "Spend", "Fleet"]
     assert ui(0) == {"up", "prov"}
     assert ui(1) == {"menu"}
     assert ui(2) == {"model"}
     assert ui(3) == {"pol"}
     assert ui(4) == {"spend", "keyuse"}
+    assert ui(5) == {"agent"}
 
 
 def test_settings_pages_cover_every_field_once():

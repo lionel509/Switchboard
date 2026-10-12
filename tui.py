@@ -12,6 +12,8 @@ truecolor but does not render it, and indexed degrades cleanly everywhere.
 import curses
 import json
 import os
+import re
+import stat
 import subprocess
 import sys
 
@@ -170,6 +172,14 @@ def row_segs(kind, payload, cat, picks, keyed=False):
         return [(payload, "head")]
     if kind in ("blank", "note"):
         return [(payload, "note")]
+    if kind == "agent":
+        name, model = payload
+        segs = [(pad(name, 16), "id"), (pad(model or "n/a", 8), "tier")]
+        chain = tier_chain(cat, model) if model else []
+        if not chain:
+            return segs + [("no chain", "note")]
+        text = " → ".join(_short(h) for h in chain)
+        return segs + [(text, "warn" if any(hop_metered(cat, h) for h in chain) else "note")]
     if kind == "up":
         u = payload
         host = u.get("host", "?")
@@ -282,13 +292,29 @@ def new_upstream(cat, name, label="", key_file=""):
 
 # ---- the /model menu, fallbacks, folder policy (pure, so testable) ----------
 
-PAGES = ["Providers", "Menu", "Models", "Policy", "Spend"]      # one per section heading, in order
+PAGES = ["Providers", "Menu", "Models", "Policy", "Spend", "Fleet"]      # one per section heading, in order
 SETTINGS_PAGES = [("Basics", ("IDENTITY", "MENU")), ("Routing", ("ROUTING",)),
                   ("Limits", ("LIMITS",)), ("Notes", ("NOTES",))]
 MAX_MENU = 10            # Claude Code folds the rest behind "… +N models"
 FALLBACK_MAX_IN = 0.20   # $/1M input: a cash fallback must be Flash-class (CLAUDE.md)
 POLICY_DATA = ["any", "zdr", "claude"]
 POLICY_TIER = ["pro", "flash"]
+
+# ---- fleet band and Fleet page (#58) ----
+TICK_MS = 400                          # band animation step: a key-less tick in loop()
+BAND_KEY = ord("b")                    # shows/hides the band; the choice persists
+BAND_MIN_LIST = 10                     # the band is hidden rather than squeeze the list below this
+ALIASES = ("haiku", "sonnet", "opus", "fable")
+MARK_START = "<!-- fleet-map:start -->"
+MARK_END = "<!-- fleet-map:end -->"
+AGENTS_DIR = os.path.expanduser("~/.claude/agents")
+CLAUDE_MD = os.path.expanduser("~/.claude/CLAUDE.md")
+LIVE_FILE = os.path.join(HERE, "live-upstreams.json")     # written by the router (#57)
+PREFS_FILE = os.path.join(HERE, "tui-prefs.json")         # this editor's own choices, gitignored
+AGENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]*")
+BAND_NOTE = "no fallback chains in models.json: every model fails instead"
+PACKET = "●"                      # a packet moving down its chain
+PINNED = "◉"                      # the router is serving the head from this hop
 
 
 def in_menu(cat, mid):
@@ -378,6 +404,438 @@ def fallback_text(cat, m):
         return "none -- fail instead"
     probs = fallback_problems(cat, ids)
     return ", ".join(ids) + ("   \u26a0 %d over the $%.2f/1M rule" % (len(probs), FALLBACK_MAX_IN) if probs else "")
+
+
+def _models(cat):
+    """The well-formed catalog rows: a hand-edited junk entry is skipped, not fatal."""
+    rows = cat.get("models")
+    if not isinstance(rows, list):
+        return []
+    return [m for m in rows if isinstance(m, dict) and isinstance(m.get("id"), str)]
+
+
+def _row(cat, mid):
+    return next((m for m in _models(cat) if m.get("id") == mid), None)
+
+
+def chain_for(cat, mid):
+    """The failover chain router.failover_chain() gives `mid`: the per-model
+    `failover` wins, else `failover_default`. Self, duplicates and unknown ids drop."""
+    chain = (_row(cat, mid) or {}).get("failover")
+    if chain is None:
+        chain = cat.get("failover_default") or []
+    if isinstance(chain, str):
+        chain = [chain]
+    if not isinstance(chain, list):
+        chain = []
+    known = {m["id"] for m in _models(cat)}
+    seen, out = {mid}, []
+    for m in chain:
+        if isinstance(m, str) and m and m not in seen and m in known:
+            seen.add(m)
+            out.append(m)
+    return out
+
+
+def hop_metered(cat, mid):
+    """router.metered(): cash unless the catalog bills it to a plan. Unknown ids
+    count as metered, and a bare claude-* id is the Anthropic plan (#41)."""
+    if mid.startswith("claude-") and "/" not in mid:
+        return False
+    return (_row(cat, mid) or {}).get("billing") != "subscription"
+
+
+def chain_groups(cat):
+    """[(heads, tail)]: rows whose chains are identical share one band line."""
+    groups = []
+    for m in _models(cat):
+        mid = m.get("id")
+        tail = chain_for(cat, mid) if mid else []
+        if not tail:
+            continue
+        for heads, t in groups:
+            if t == tail:
+                heads.append(mid)
+                break
+        else:
+            groups.append(([mid], tail))
+    return groups
+
+
+def read_live(path):
+    """{head: model now serving it} from live-upstreams.json; {} when the file is
+    missing, unreadable or shaped wrong. Only the router writes it."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except (OSError, ValueError, RecursionError):
+        return {}
+    if not isinstance(d, dict):
+        return {}
+    return {k: v["model"] for k, v in d.items()
+            if isinstance(v, dict) and isinstance(v.get("model"), str)}
+
+
+def packet_at(heads, tail, live, frame):
+    """(hop, pinned). Hop 0 is the head, hop k is tail[k-1]. A live hop pins the
+    packet there (the deepest one, if several heads disagree); otherwise it moves."""
+    pos = []
+    for h in heads:
+        served = live.get(h)
+        if not served:
+            continue
+        if served == h:
+            pos.append(0)
+        elif served in tail:
+            pos.append(tail.index(served) + 1)
+    if pos:
+        return max(pos), True
+    return frame % (len(tail) + 1), False
+
+
+def tier_of(cat, model):
+    """An agent's alias is its tier; a catalog id uses its row's tier."""
+    if model in ALIASES:
+        return model
+    return (_row(cat, model) or {}).get("tier") or None
+
+
+def tier_chain(cat, model):
+    """[the tier's own last-listed id, *chain]. Among the catalog rows of this model's
+    tier that share the tier's first chain, the last one listed. A band line can merge
+    tiers that share a chain, so the id is never taken from the merged line."""
+    tier = tier_of(cat, model)
+    if tier is None:
+        return []
+    rows = _models(cat)
+    first = next((chain_for(cat, m["id"]) for m in rows
+                  if m.get("tier") == tier and chain_for(cat, m["id"])), None)
+    if not first:
+        return []
+    own = [m["id"] for m in rows if m.get("tier") == tier and chain_for(cat, m["id"]) == first]
+    return [own[-1]] + first
+
+def _short(mid):
+    return mid[len("claude-"):] if mid.startswith("claude-") else mid
+
+
+def _clip(text, n):
+    """text, or its first n-1 characters and an ellipsis when it is longer than n."""
+    if len(text) <= n:
+        return text
+    return text[:max(0, n - 1)] + "…" if n > 0 else ""
+
+
+def _shrink(labels, budget):
+    """Shorten the longest label, one cell at a time, until the labels fit the budget."""
+    labels = list(labels)
+    while sum(len(l) for l in labels) > budget:
+        i = max(range(len(labels)), key=lambda k: len(labels[k]))
+        if len(labels[i]) <= 4:
+            break
+        labels[i] = _clip(labels[i], len(labels[i]) - 1)
+    return labels
+
+
+def _wrap_units(units, width):
+    """Pack units (each a list of segments) into rows of `width`. A unit is never split."""
+    rows, row, used = [], [], 0
+    for unit in units:
+        n = sum(len(t) for t, _ in unit)
+        if row and used + n > width:
+            rows.append(row)
+            row, used = [("  ", "rule")], 2
+        row = row + unit
+        used += n
+    if row:
+        rows.append(row)
+    return rows
+
+
+def _main_alias(main):
+    """The main model as its alias (opus[1m] -> opus); anything else is shown as it is."""
+    main = main or ""
+    return next((a for a in ALIASES if a in main), main or "?")
+
+
+def band_lines(cat, live, agents, main, frame, width=None):
+    """The band: one line per distinct chain, then the spawn tree. Each line is a
+    list of (text, role) segments for putsegs(). With `width`, every line fits in it:
+    chain labels shorten with an ellipsis, and the tree wraps onto more rows."""
+    lines = []
+    groups = chain_groups(cat)
+    if not groups:
+        lines.append([(BAND_NOTE if width is None else _clip(BAND_NOTE, width), "note")])
+    for g, (heads, tail) in enumerate(groups):
+        packet, pinned = packet_at(heads, tail, live, frame + g)
+        labels = ["·".join(_short(h) for h in heads)] + list(tail)
+        metered = [any(hop_metered(cat, h) for h in heads)] + [hop_metered(cat, t) for t in tail]
+        if width is not None:
+            fixed = 4 * (len(labels) - 1) + 2 + 2 * sum(metered) + (6 if pinned else 0)
+            labels = _shrink(labels, width - fixed)
+        segs = []
+        for k, (label, is_metered) in enumerate(zip(labels, metered)):
+            if k:
+                lit = k <= packet
+                segs.append((" ━▶ " if lit else " ─▶ ", "sel" if lit else "rule"))
+            text = label + (" $" if is_metered else "")
+            if k == packet:
+                role = ("ok" if not is_metered else "bad") if pinned else "sel"
+                segs.append(((PINNED if pinned else PACKET) + " " + text, role))
+            else:
+                segs.append((text, "warn" if is_metered else ("id" if k == 0 else "note")))
+        if pinned:
+            segs.append(("  LIVE", "warn"))
+        lines.append(segs)
+    order = {m: i for i, m in enumerate(("opus", "fable", "sonnet", "haiku"))}
+    by_model = {}
+    for name, model in agents:
+        by_model.setdefault(model or "?", []).append(name)
+    models = sorted(by_model, key=lambda m: (order.get(m, 99), m))
+    units = [[("main (%s)" % _main_alias(main), "head")]]
+    for gi, mdl in enumerate(models):
+        label = "%s (%s)" % ("·".join(sorted(by_model[mdl])), mdl)
+        if width is not None:
+            label = _clip(label, max(10, width - 8))
+        units.append([(" ⇢ ", "sel" if gi == frame % len(models) else "rule"), (label, "id")])
+    units.append([("   subagents can't spawn", "note")])
+    if width is None:
+        lines.append([seg for unit in units for seg in unit])
+    else:
+        lines.extend(_wrap_units(units, width))
+    return lines
+
+
+HEAD_SEP = "  \u00b7  "
+
+
+def fit_head(text, width):
+    """A section heading that fits in `width`, cut only at whole boundaries. Whole
+    middle-dot segments drop from the right. A segment that is still too long keeps
+    its whole words, then a standalone ellipsis marks what was dropped. A word that
+    cannot fit at all is dropped and marked the same way."""
+    parts = text.split(HEAD_SEP)
+    while len(HEAD_SEP.join(parts)) > width and len(parts) > 1:
+        parts.pop()
+    head = HEAD_SEP.join(parts)
+    if len(head) <= width:
+        return head
+    best = ""
+    for m in re.finditer(r"\S+", head):
+        cand = head[:m.end()] + " \u2026"
+        if len(cand) > width:
+            break
+        best = cand
+    return best or ("\u2026" if width >= 1 else "")
+
+def fit_hints(pairs, width):
+    """The footer hints that fit in `width`. A hint is dropped whole, from the right;
+    the band hint (b) is never dropped."""
+    kept = list(pairs)
+
+    def cells(ps):
+        return sum(len(k) + 1 + len(l) for k, l in ps) + 5 * max(0, len(ps) - 1)
+    while cells(kept) > width:
+        idx = next((i for i in range(len(kept) - 1, -1, -1) if kept[i][0] != "b"), None)
+        if idx is None:
+            break
+        del kept[idx]
+    return kept
+
+
+def band_height(h, n_lines, band_on):
+    """Rows the band takes (border included), 0 when hidden or the list would be too short."""
+    if not band_on:
+        return 0
+    band_h = n_lines + 2
+    if h - 2 - band_h - 3 < BAND_MIN_LIST:
+        return 0
+    return band_h
+
+
+def read_prefs(path):
+    """This editor's saved choices; {} when there are none or the file is unreadable."""
+    try:
+        with open(path) as f:
+            d = json.load(f)
+    except (OSError, ValueError, RecursionError):
+        return {}
+    return d if isinstance(d, dict) else {}
+
+
+def write_prefs(path, prefs):
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(prefs, f, indent=2)
+        f.write("\n")
+    os.replace(tmp, path)
+
+
+def _frontmatter(text):
+    """(lines, index of the closing fence) for a leading ---fenced block, else None."""
+    lines = text.splitlines(keepends=True)
+    if not lines or lines[0].lstrip("\ufeff").rstrip("\r\n") != "---":
+        return None
+    for i in range(1, len(lines)):
+        if lines[i].rstrip("\r\n") == "---":
+            return lines, i
+    return None
+
+
+_INLINE_COMMENT = re.compile(r"(?:^|(?<=\s))#")
+
+
+def _split_value(value):
+    """(value, comment): the YAML value and its inline comment, which starts at a
+    '#' at the start or after whitespace. The comment keeps its own spacing."""
+    m = _INLINE_COMMENT.search(value)
+    return (value, "") if m is None else (value[:m.start()], value[m.start():])
+
+
+def _model_of(text):
+    fm = _frontmatter(text)
+    if fm is None:
+        return ""
+    lines, close = fm
+    for line in lines[1:close]:
+        if line.startswith("model:"):
+            head, _ = _split_value(line[len("model:"):])
+            return head.strip().strip("\"'")
+    return ""
+
+
+def read_agents(dirpath):
+    """[(name, model)] for ~/.claude/agents/*.md, by file name. model is the
+    frontmatter `model:` value, or "" when it has none."""
+    try:
+        names = sorted(os.listdir(dirpath))
+    except OSError:
+        return []
+    out = []
+    for fn in names:
+        stem, ext = os.path.splitext(fn)
+        if ext != ".md" or not AGENT_NAME.fullmatch(stem):
+            continue
+        path = os.path.join(dirpath, fn)
+        if not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", newline="") as f:
+                text = f.read()
+        except (OSError, UnicodeDecodeError):
+            out.append((stem, "unreadable"))
+            continue
+        out.append((stem, _model_of(text)))
+    return out
+
+
+def set_model_line(text, alias):
+    """The agent file with its frontmatter `model:` set to `alias`. Every other
+    byte is kept; a missing line is inserted just before the closing fence."""
+    if alias not in ALIASES:
+        raise ValueError("not an alias: %s" % alias)
+    fm = _frontmatter(text)
+    if fm is None:
+        raise ValueError("no ---fenced frontmatter; left alone")
+    lines, close = fm
+    for i in range(1, close):
+        if lines[i].startswith("model:"):
+            body = lines[i][:len(lines[i].rstrip("\r\n"))]
+            end = lines[i][len(body):]
+            value = body[len("model:"):]
+            head, comment = _split_value(value)
+            lead = value[:len(value) - len(value.lstrip())] or " "   # an empty value still needs the space
+            gap = head[len(head.rstrip()):]          # spacing before the comment, kept as written
+            lines[i] = "model:%s%s%s%s%s" % (lead, alias, gap, comment, end)
+            return "".join(lines)
+    end = lines[close][len("---"):] or "\n"
+    lines.insert(close, "model: %s%s" % (alias, end))
+    return "".join(lines)
+
+
+def next_alias(model):
+    if model not in ALIASES:
+        return "haiku"
+    return ALIASES[(ALIASES.index(model) + 1) % len(ALIASES)]
+
+
+def fleet_block(cat, agents, main):
+    """The marked CLAUDE.md block: one row per agent, its tier's chain, metered hops flagged.
+    `main` is accepted for the call sites; the table is about agents, not the main model."""
+    del main
+    rows = ["| Agent | Model | Spawned by | Can spawn | Fallback chain |", "|---|---|---|---|---|"]
+    for name, model in agents:
+        chain = tier_chain(cat, model) if model else []
+        text = " → ".join(h + (" (metered)" if hop_metered(cat, h) else "") for h in chain)
+        rows.append("| %s | %s | main session | no | %s |"
+                    % (name, model or "n/a", text or "none -- fails instead"))
+    return "\n".join([MARK_START] + rows + [
+        "",
+        "Only the main session spawns agents; subagents cannot. Generated by Switchboard (sb → Fleet). "
+        "Edits inside these markers are overwritten.",
+        MARK_END])
+
+
+def splice_block(text, block):
+    """`text` with the marked block replaced, or appended when there are no markers.
+    Text outside the markers is kept byte for byte; malformed markers raise."""
+    nl = "\r\n" if "\r\n" in text else "\n"
+    block = block.replace("\n", nl)
+    n_start, n_end = text.count(MARK_START), text.count(MARK_END)
+    if n_start == 0 and n_end == 0:
+        sep = "" if (not text or text.endswith(nl * 2)) else (nl if text.endswith("\n") else nl * 2)
+        return text + sep + block + nl
+    s, e = text.find(MARK_START), text.find(MARK_END)
+    if n_start != 1 or n_end != 1 or e < s:
+        raise ValueError("CLAUDE.md fleet-map markers are malformed; left alone")
+    return text[:s] + block + text[e + len(MARK_END):]
+
+
+def _atomic_write(path, text):
+    real = os.path.realpath(path)          # a symlinked file stays a link
+    tmp = real + ".tmp"
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        f.write(text)
+    if os.path.exists(real):
+        os.chmod(tmp, stat.S_IMODE(os.stat(real).st_mode))
+    os.replace(tmp, real)
+
+
+def write_fleet(agents_dir, claude_md, cat, main, name=None, alias=None):
+    """The only writer. Everything is computed before anything is written: a bad
+    marker or an unknown agent leaves both files untouched."""
+    agents = read_agents(agents_dir)
+    agent_path = old = new_agent = None
+    if name is not None:
+        if name not in dict(agents):
+            raise ValueError("no agent named %s" % name)
+        agent_path = os.path.join(agents_dir, name + ".md")
+        with open(agent_path, encoding="utf-8", newline="") as f:
+            old = f.read()
+        new_agent = set_model_line(old, alias)
+        agents = [(n, alias if n == name else m) for n, m in agents]
+    try:
+        with open(claude_md, encoding="utf-8", newline="") as f:
+            md = f.read()
+    except FileNotFoundError:
+        md = ""
+    block = fleet_block(cat, agents, main)
+    if block.count(MARK_START) != 1 or block.count(MARK_END) != 1:
+        raise ValueError("an agent's model: line contains a fleet-map marker; left alone")
+    spliced = splice_block(md, block)
+    wrote_agent = new_agent is not None and new_agent != old
+    if wrote_agent:
+        _atomic_write(agent_path, new_agent)
+    if spliced != md:
+        try:
+            _atomic_write(claude_md, spliced)
+        except OSError:
+            if wrote_agent:                  # put the agent file back, so the pair stays in step
+                try:
+                    _atomic_write(agent_path, old)
+                except OSError:
+                    pass
+            raise
 
 
 def settings_page(rows, page):
@@ -478,6 +936,10 @@ class UI(object):
         self.new_primary = None
         self.page = 0
         self.keyuse = {}
+        self.frame = 0                       # band animation step, advanced on each tick
+        self.live = read_live(LIVE_FILE)
+        self.agents = read_agents(AGENTS_DIR)
+        self.band_on = read_prefs(PREFS_FILE).get("band", True) is not False
         self.refresh_spend()
         self.rebuild()
 
@@ -564,6 +1026,12 @@ class UI(object):
         for name in self.keyuse:
             label = next((u.get("label") or name for u in self.cat.get("upstreams", []) if u["name"] == name), name)
             rows.append(("keyuse", ("key: " + label, name)))
+        rows += [("blank", ""), ("head", "FLEET   enter = next model (haiku \u2192 sonnet \u2192 opus \u2192 fable)  \u00b7  w write CLAUDE.md block")]
+        agents = getattr(self, "agents", [])
+        for name, model in agents:
+            rows.append(("agent", (name, model)))
+        if not agents:
+            rows.append(("note", "no agent files in ~/.claude/agents"))
         # One page per section: split at the headings and keep this page's.
         heads = [i for i, r in enumerate(rows) if r[0] == "head"] + [len(rows)]
         page = getattr(self, "page", 0)
@@ -578,7 +1046,7 @@ class UI(object):
         kind, payload = self.rows[i]
         if kind == "up":
             return not payload.get("fixed")      # nothing to do for a fixed row
-        return kind in ("prov", "model", "menu", "pol")
+        return kind in ("prov", "model", "menu", "pol", "agent")
 
     def move(self, delta):
         self.reveal_end = False
@@ -595,6 +1063,34 @@ class UI(object):
 
     def current(self):
         return self.rows[self.sel] if self.rows else ("blank", "")
+
+    # ---------- fleet (#58) ----------
+
+    def toggle_band(self):
+        self.band_on = not self.band_on
+        self._drawn_top = None               # the layout changed: repaint in full
+        try:
+            write_prefs(PREFS_FILE, {"band": self.band_on})
+            self.status = "band shown" if self.band_on else "band hidden (b shows it again)"
+        except OSError as e:
+            self.status = "band toggled but not saved: %s" % e
+
+    def set_agent(self, payload):
+        """Enter on an agent steps its model; w (payload None) rewrites the CLAUDE.md
+        block alone. Writes the agent file and CLAUDE.md, never models.json."""
+        name, alias = (payload[0], next_alias(payload[1])) if payload else (None, None)
+        try:
+            write_fleet(AGENTS_DIR, CLAUDE_MD, self.cat, self.primary, name, alias)
+        except (OSError, ValueError) as e:
+            self.status = "not written: %s" % e
+            return
+        self.agents = read_agents(AGENTS_DIR)
+        self.status = ("%s \u2192 %s \u00b7 agent file + CLAUDE.md block written" % (name, alias)
+                       if name else "CLAUDE.md fleet block written")
+        self.rebuild()
+        if name:
+            self.sel = next((i for i, r in enumerate(self.rows)
+                             if r[0] == "agent" and r[1][0] == name), self.sel)
 
     # ---------- drawing ----------
 
@@ -615,6 +1111,16 @@ class UI(object):
             pass
         return x + len(text)
 
+    def _cell(self, y, x, text, a=0):
+        """Like put(), but may use the last column: panel borders end there."""
+        h, w = self.scr.getmaxyx()
+        if y < 0 or y >= h or x < 0 or x >= w:
+            return
+        try:
+            self.scr.addnstr(y, x, text, max(0, w - x), a)
+        except curses.error:
+            pass
+
     def putsegs(self, y, x, segs, force=None, right=None):
         for text, role in segs:
             if not text:
@@ -629,13 +1135,13 @@ class UI(object):
         a = attr("sel" if active else "rule")
         if height < 2 or width < 4:
             return
-        self.put(top, left, "\u256d" + "\u2500" * (width - 2) + "\u256e", a)
+        self._cell(top, left, "\u256d" + "\u2500" * (width - 2) + "\u256e", a)
         if title:
             self.put(top, left + 2, " " + title + " ", attr("title" if active else "head"))
         for y in range(top + 1, top + height - 1):
-            self.put(y, left, "\u2502", a)
-            self.put(y, left + width - 1, "\u2502", a)
-        self.put(top + height - 1, left,
+            self._cell(y, left, "\u2502", a)
+            self._cell(y, left + width - 1, "\u2502", a)
+        self._cell(top + height - 1, left,
                  "\u2570" + "\u2500" * (width - 2) + "\u256f", a)
 
     def wrap(self, text, width):
@@ -661,7 +1167,11 @@ class UI(object):
         if w >= 92:
             det_w = max(30, min(40, w // 3))
         list_w = w - det_w - (1 if det_w else 0)
-        panel_h = h - 2                      # leave the footer row + a gap
+        lines = band_lines(self.cat, self.live, self.agents, self.primary, self.frame,
+                           width=w - 4) if self.band_on else []
+        band_h = band_height(h, len(lines), self.band_on)
+        panel_h = h - 2 - band_h             # leave the footer row + a gap, and the band
+        self._band_top = panel_h if band_h else h
 
         title = "Switchboard"
         if self.dirty:
@@ -689,7 +1199,7 @@ class UI(object):
             self.put(y, 1, "\u258c" if cur else " ", attr("sel"))
             x, edge = 3, list_w - 1
             if kind == "head":
-                self.put(y, x, payload, attr("head"), edge)
+                self.put(y, x, fit_head(payload, edge - x), attr("head"), edge)
             elif kind in ("blank", "note"):
                 self.put(y, x, payload, attr("note"), edge)
             elif kind == "up":
@@ -712,21 +1222,28 @@ class UI(object):
         # scroll position, drawn on the border so it costs no row
         if len(self.rows) > inner_h:
             frac = self.top / float(max(1, len(self.rows) - inner_h))
-            self.put(2 + int(frac * (inner_h - 1)), list_w - 1, "\u2503", attr("sel"))
+            self._cell(2 + int(frac * (inner_h - 1)), list_w - 1, "\u2503", attr("sel"))
 
         if det_w:
             self.detail(0, list_w + 1, panel_h, det_w)
+        if band_h:
+            self.box(panel_h, 0, band_h, w, "fallback chains \u00b7 spawn map", False)
+            for i, segs in enumerate(lines):
+                self.putsegs(panel_h + 1 + i, 2, segs, right=w - 2)
 
         kind = self.current()[0]
         keys = {"menu": [("[ ]", "move"), ("enter", "start here"), ("d", "remove")],
                 "pol": [("enter", "data"), ("t", "tier"), ("a", "add folder"), ("d", "forget")],
                 "model": [("space", "menu on/off"), ("enter", "edit"), ("a", "add"), ("d", "del")],
+                "agent": [("enter", "next model"), ("w", "write CLAUDE.md")],
                 }.get(kind, [("r", "refresh")] if PAGES[getattr(self, "page", 0)] == "Spend"
+                      else [] if PAGES[getattr(self, "page", 0)] == "Fleet"
                       else [("enter", "sign in"), ("a", "add key"), ("l", "login")])
         if self.status:
             self.put(h - 2, 2, short(self.status, w - 4), attr("note"))
-        self.footer(h - 1, w, [("\u2190\u2192", "page"), ("\u2191\u2193", "move")] + keys
-                    + [("s", "save all"), ("q", "quit")])
+        hints = [("\u2190\u2192", "page"), ("\u2191\u2193", "move")] + keys
+        hints += [("b", "hide band" if self.band_on else "show band"), ("s", "save all"), ("q", "quit")]
+        self.footer(h - 1, w, fit_hints(hints, w - 4))
         self.scr.refresh()
 
     def detail(self, top, left, height, width):
@@ -1273,6 +1790,8 @@ class UI(object):
         if down and (bstate & down):
             self.move(1)
             return
+        if my >= getattr(self, "_band_top", 10 ** 6):
+            return                           # the band is not a list
         idx = self.top + (my - 1)            # row 0 is the panel border
         if 0 <= idx < len(self.rows) and self.selectable(idx):
             same = (idx == self.sel)
@@ -1332,7 +1851,15 @@ class UI(object):
             self.move(1)
         while True:
             self.draw()
+            # A tick only while the band is shown; blocking mode is restored before
+            # any handler runs, so prompts and sub-screens never see a -1.
+            self.scr.timeout(TICK_MS if self.band_on else -1)
             c = self.scr.getch()
+            self.scr.timeout(-1)
+            if c == -1:
+                self.frame += 1
+                self.live = read_live(LIVE_FILE)
+                continue
             kind, payload = self.current()
             if c in (curses.KEY_UP, ord("k")):
                 self.move(-1)
@@ -1404,6 +1931,12 @@ class UI(object):
                 self.refresh_spend()
                 self.rebuild()
                 self.status = "spend refreshed"
+            elif c in (10, 13, curses.KEY_ENTER) and kind == "agent":
+                self.set_agent(payload)
+            elif c == ord("w") and kind == "agent":
+                self.set_agent(None)
+            elif c == BAND_KEY:
+                self.toggle_band()
             elif c in (10, 13, curses.KEY_ENTER):
                 if kind == "model":
                     self.edit_model(payload)
