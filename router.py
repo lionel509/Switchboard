@@ -954,7 +954,16 @@ def limit_setting(name):
         return LIMIT_DEFAULTS[name]
     v = lim[name]
     if name == "gate":
-        return v if isinstance(v, dict) else LIMIT_DEFAULTS["gate"]
+        if not isinstance(v, dict):
+            return LIMIT_DEFAULTS["gate"]
+        out = {}
+        for up, keys in v.items():
+            if isinstance(keys, (list, tuple)) and all(
+                    isinstance(k, str) and k.endswith("_pct") for k in keys):
+                out[up] = list(keys)
+            elif up in LIMIT_DEFAULTS["gate"]:
+                out[up] = LIMIT_DEFAULTS["gate"][up]
+        return out
     if v is None and name in ("fallback_cash_per_day", "worker_shift_pct"):
         return None
     if _num(v) and 0 <= v < float("inf"):
@@ -1001,7 +1010,7 @@ def read_limits(upstream, now):
     try:
         with open(limits_file(upstream)) as f:
             d = json.load(f)
-    except (OSError, ValueError):
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(d, dict):
         return None
@@ -1043,7 +1052,8 @@ def mark_429(model, resp, now=None):
         return
     now = time.time() if now is None else now
     ra = resp.getheader("retry-after")
-    if isinstance(ra, str) and ra.strip().isascii() and ra.strip().isdigit():
+    if (isinstance(ra, str) and ra.strip().isascii() and ra.strip().isdigit()
+            and len(ra.strip()) <= 7):
         secs = int(ra.strip())
     else:
         secs = limit_setting("cooloff_minutes") * 60
@@ -1056,7 +1066,7 @@ def fallback_spent_today():
     is local time, so today is the local date. Finite positive numeric costs only.
     Uncached: a scan is about 0.04 s, and a cache would hide spend made inside it.
     The cap is checked, not reserved: metered fallbacks already in flight can each
-    pass it, so it can overshoot by their cost (follow-up A, see PR #57 Known limits)."""
+    pass it, so it can overshoot by their cost (#60)."""
     today = time.strftime("%Y-%m-%d")
     total = 0.0
     try:
@@ -1066,14 +1076,14 @@ def fallback_spent_today():
                     continue
                 try:
                     rec = json.loads(line)
-                except ValueError:
+                except (ValueError, RecursionError):
                     continue
                 if (isinstance(rec, dict) and str(rec.get("ts", ""))[:10] == today
                         and _num(rec.get("cost")) and 0 < rec["cost"] < float("inf")):
                     total += rec["cost"]
     except OSError:
         total = 0.0
-    return total
+    return round(total, 6)
 
 
 def note_live(head, served):
