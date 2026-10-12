@@ -468,3 +468,80 @@ def test_infinite_reset_in_file_does_not_crash():
     write_limits("kimi", '{"ts": "%s", "five_hour_pct": 100, '
                          '"five_hour_resets_at": Infinity}' % now_iso())
     assert r.skip_reason(KIMI, "kimi") is None
+
+
+# --- review round 2 (PR #57) ----------------------------------------------
+# The breaker's round-2 bodies, verbatim, over the helpers above.
+
+def spend(amount):
+    write_ledger([fallback_row(amount)])
+
+
+def handler(issue, fails):
+    h = make_handler({}, [], fails)
+    h.issue = issue
+    return h
+
+
+def simple_issue(outcomes, calls, raise_for=()):
+    def issue(method, att, rec):
+        calls.append(att["model"])
+        if att["model"] in raise_for:
+            raise OSError("connection reset")
+        return FakeConn(), FakeResp(outcomes.get(att["model"], 200))
+    return issue
+
+
+def test_cap_refusal_on_middle_metered_still_tries_plan_last():
+    spend(5.00)                                   # cap reached today
+    calls, fails = [], []
+    h = handler(simple_issue({HAIKU: 429}, calls), fails)
+    h.relay("POST", prep([(HAIKU, "anthropic"), (MIMO, "openrouter"), (KIMI, "kimi")]))
+    assert calls == [HAIKU, KIMI], "calls=%r fails=%r" % (calls, fails)
+    kimi_row = [x for x in read_rows() if x.get("model_requested") == KIMI][-1]
+    assert kimi_row["skipped"][MIMO].startswith("cash cap")
+
+
+def test_string_cash_cap_is_not_silently_disabled(monkeypatch):
+    monkeypatch.setitem(r.CATALOG, "limits", {"fallback_cash_per_day": "5"})
+    spend(10.00)
+    calls, fails = [], []
+    h = handler(simple_issue({HAIKU: 429}, calls), fails)
+    h.relay("POST", prep([(HAIKU, "anthropic"), (MIMO, "openrouter")]))
+    assert MIMO not in calls, "cap ignored: calls=%r" % calls
+
+
+@pytest.mark.parametrize("name, value, expected", [
+    ("fallback_cash_per_day", "5", 5.0),
+    ("fallback_cash_per_day", float("nan"), 5.0),
+    ("fallback_cash_per_day", -1, 5.0),
+    ("fallback_cash_per_day", True, 5.0),
+    ("fallback_cash_per_day", float("inf"), 5.0),
+    ("fallback_cash_per_day", None, None),
+    ("fallback_cash_per_day", 0.0, 0.0),
+    ("fallback_cash_per_day", 2.5, 2.5),
+    ("cooloff_minutes", None, 15),
+    ("cooloff_minutes", "15", 15),
+    ("stale_minutes", None, 15),
+    ("stale_minutes", "15", 15),
+    ("worker_shift_pct", "85", None),
+    ("worker_shift_pct", 85, 85),
+    ("gate", ["five_hour_pct"], r.LIMIT_DEFAULTS["gate"]),
+])
+def test_limit_setting_bad_values_use_default(monkeypatch, name, value, expected):
+    monkeypatch.setitem(r.CATALOG, "limits", {name: value})
+    assert r.limit_setting(name) == expected
+
+
+def test_null_cooloff_does_not_crash_a_429(monkeypatch):
+    monkeypatch.setitem(r.CATALOG, "limits", {"cooloff_minutes": None})
+    calls, _ = run({HAIKU: 429, KIMI: 200}, chain=[(HAIKU, "anthropic"), (KIMI, "kimi")])
+    assert calls == [HAIKU, KIMI]
+    assert abs(r.SKIP_UNTIL[HAIKU] - (time.time() + 900)) < 5
+
+
+def test_quoted_stale_minutes_still_skips(monkeypatch):
+    monkeypatch.setitem(r.CATALOG, "limits", {"stale_minutes": "15"})
+    write_limits("anthropic", claude_snapshot(seven=100))
+    calls, _ = run({KIMI: 200}, chain=[(HAIKU, "anthropic"), (KIMI, "kimi")])
+    assert calls == [KIMI]
