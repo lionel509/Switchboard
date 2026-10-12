@@ -273,10 +273,11 @@ def test_splice_property():
             cut = rng.randint(0, len(text))
             text = text[:cut] + b1 + text[cut:]
         out = tui.splice_block(text, b2)
+        nl = "\r\n" if "\r\n" in text else "\n"     # the block takes the file's line ending
         if has_block:
             s = text.index(MS)
             e = text.index(ME) + len(ME)
-            assert out == text[:s] + b2 + text[e:]
+            assert out == text[:s] + b2.replace("\n", nl) + text[e:]
             assert out.startswith(text[:s]) and out.endswith(text[e:])
         else:
             assert out.startswith(text)

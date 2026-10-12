@@ -13,6 +13,7 @@ import curses
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 
@@ -405,8 +406,16 @@ def fallback_text(cat, m):
     return ", ".join(ids) + ("   \u26a0 %d over the $%.2f/1M rule" % (len(probs), FALLBACK_MAX_IN) if probs else "")
 
 
+def _models(cat):
+    """The well-formed catalog rows: a hand-edited junk entry is skipped, not fatal."""
+    rows = cat.get("models")
+    if not isinstance(rows, list):
+        return []
+    return [m for m in rows if isinstance(m, dict) and isinstance(m.get("id"), str)]
+
+
 def _row(cat, mid):
-    return next((m for m in cat.get("models", []) if m.get("id") == mid), None)
+    return next((m for m in _models(cat) if m.get("id") == mid), None)
 
 
 def chain_for(cat, mid):
@@ -417,10 +426,12 @@ def chain_for(cat, mid):
         chain = cat.get("failover_default") or []
     if isinstance(chain, str):
         chain = [chain]
-    known = {m.get("id") for m in cat.get("models", [])}
+    if not isinstance(chain, list):
+        chain = []
+    known = {m["id"] for m in _models(cat)}
     seen, out = {mid}, []
     for m in chain:
-        if m and m not in seen and m in known:
+        if isinstance(m, str) and m and m not in seen and m in known:
             seen.add(m)
             out.append(m)
     return out
@@ -437,7 +448,7 @@ def hop_metered(cat, mid):
 def chain_groups(cat):
     """[(heads, tail)]: rows whose chains are identical share one band line."""
     groups = []
-    for m in cat.get("models", []):
+    for m in _models(cat):
         mid = m.get("id")
         tail = chain_for(cat, mid) if mid else []
         if not tail:
@@ -494,7 +505,7 @@ def tier_chain(cat, model):
     tier = tier_of(cat, model)
     if tier is None:
         return []
-    for m in cat.get("models", []):
+    for m in _models(cat):
         if m.get("tier") == tier:
             chain = chain_for(cat, m.get("id"))
             if chain:
@@ -577,7 +588,7 @@ def write_prefs(path, prefs):
 def _frontmatter(text):
     """(lines, index of the closing fence) for a leading ---fenced block, else None."""
     lines = text.splitlines(keepends=True)
-    if not lines or lines[0].rstrip("\r\n") != "---":
+    if not lines or lines[0].lstrip("﻿").rstrip("\r\n") != "---":
         return None
     for i in range(1, len(lines)):
         if lines[i].rstrip("\r\n") == "---":
@@ -615,6 +626,7 @@ def read_agents(dirpath):
             with open(path, encoding="utf-8", newline="") as f:
                 text = f.read()
         except (OSError, UnicodeDecodeError):
+            out.append((stem, "unreadable"))
             continue
         out.append((stem, _model_of(text)))
     return out
@@ -665,10 +677,12 @@ def fleet_block(cat, agents, main):
 def splice_block(text, block):
     """`text` with the marked block replaced, or appended when there are no markers.
     Text outside the markers is kept byte for byte; malformed markers raise."""
+    nl = "\r\n" if "\r\n" in text else "\n"
+    block = block.replace("\n", nl)
     n_start, n_end = text.count(MARK_START), text.count(MARK_END)
     if n_start == 0 and n_end == 0:
-        sep = "" if (not text or text.endswith("\n\n")) else ("\n" if text.endswith("\n") else "\n\n")
-        return text + sep + block + "\n"
+        sep = "" if (not text or text.endswith(nl * 2)) else (nl if text.endswith("\n") else nl * 2)
+        return text + sep + block + nl
     s, e = text.find(MARK_START), text.find(MARK_END)
     if n_start != 1 or n_end != 1 or e < s:
         raise ValueError("CLAUDE.md fleet-map markers are malformed; left alone")
@@ -680,6 +694,8 @@ def _atomic_write(path, text):
     tmp = real + ".tmp"
     with open(tmp, "w", encoding="utf-8", newline="") as f:
         f.write(text)
+    if os.path.exists(real):
+        os.chmod(tmp, stat.S_IMODE(os.stat(real).st_mode))
     os.replace(tmp, real)
 
 
@@ -701,11 +717,23 @@ def write_fleet(agents_dir, claude_md, cat, main, name=None, alias=None):
             md = f.read()
     except FileNotFoundError:
         md = ""
-    spliced = splice_block(md, fleet_block(cat, agents, main))
-    if new_agent is not None and new_agent != old:
+    block = fleet_block(cat, agents, main)
+    if block.count(MARK_START) != 1 or block.count(MARK_END) != 1:
+        raise ValueError("an agent's model: line contains a fleet-map marker; left alone")
+    spliced = splice_block(md, block)
+    wrote_agent = new_agent is not None and new_agent != old
+    if wrote_agent:
         _atomic_write(agent_path, new_agent)
     if spliced != md:
-        _atomic_write(claude_md, spliced)
+        try:
+            _atomic_write(claude_md, spliced)
+        except OSError:
+            if wrote_agent:                  # put the agent file back, so the pair stays in step
+                try:
+                    _atomic_write(agent_path, old)
+                except OSError:
+                    pass
+            raise
 
 
 def settings_page(rows, page):
