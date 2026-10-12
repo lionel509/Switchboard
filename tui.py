@@ -658,7 +658,7 @@ def set_model_line(text, alias):
             end = lines[i][len(body):]
             value = body[len("model:"):]
             head, comment = _split_value(value)
-            lead = value[:len(value) - len(value.lstrip())]
+            lead = value[:len(value) - len(value.lstrip())] or " "   # an empty value still needs the space
             gap = head[len(head.rstrip()):]          # spacing before the comment, kept as written
             lines[i] = "model:%s%s%s%s%s" % (lead, alias, gap, comment, end)
             return "".join(lines)
