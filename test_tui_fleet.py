@@ -439,12 +439,12 @@ def test_crlf_file_stays_crlf_inside_markers():
 
 
 def test_bom_agent_file_model_is_read():
-    assert tui._model_of("﻿---\nname: x\nmodel: sonnet\n---\nbody\n") == "sonnet"
+    assert tui._model_of("\ufeff---\nname: x\nmodel: sonnet\n---\nbody\n") == "sonnet"
 
 
 def test_bom_agent_file_can_be_set():
-    out = tui.set_model_line("﻿---\nname: x\nmodel: sonnet\n---\nbody\n", "opus")
-    assert out.startswith("﻿---\n") and "model: opus\n" in out and "model: sonnet" not in out
+    out = tui.set_model_line("\ufeff---\nname: x\nmodel: sonnet\n---\nbody\n", "opus")
+    assert out.startswith("\ufeff---\n") and "model: opus\n" in out and "model: sonnet" not in out
 
 
 def test_unreadable_agent_row_not_silently_dropped(tmp_path):
@@ -553,3 +553,51 @@ def test_write_keeps_file_modes(tmp_path):
     tui.write_fleet(str(agents), str(md), cat, "opus", "coder", "sonnet")
     assert stat.S_IMODE(os.stat(agent).st_mode) == 0o600
     assert stat.S_IMODE(os.stat(md).st_mode) == 0o600
+
+
+# --- review round 2 (PR #59): adopted breaker tests -----------------------------
+
+def test_model_line_with_inline_comment_is_read():
+    text = "---\nname: coder\nmodel: sonnet  # main coder\n---\nbody\n"
+    assert tui._model_of(text) == "sonnet"
+
+
+def test_quoted_model_with_inline_comment_reads_bare_alias():
+    text = '---\nmodel: "sonnet"  # x\n---\n'
+    assert tui._model_of(text) == "sonnet"
+
+
+def test_model_line_with_inline_comment_keeps_comment_on_set():
+    text = "---\nname: coder\nmodel: sonnet  # main coder\n---\nbody\n"
+    out = tui.set_model_line(text, "haiku")
+    assert out == "---\nname: coder\nmodel: haiku  # main coder\n---\nbody\n"
+
+
+def test_inline_comment_agent_gets_real_fallback_row(tmp_path):
+    cat = {"failover_default": [], "models": [
+        {"id": "claude-sonnet-5", "tier": "sonnet", "failover": ["kimi/k2.8"]},
+        {"id": "kimi/k2.8", "tier": "kimi", "failover": []}]}
+    ad = tmp_path / "agents"
+    ad.mkdir()
+    (ad / "coder.md").write_text("---\nname: coder\nmodel: sonnet # x\n---\n", encoding="utf-8")
+    block = tui.fleet_block(cat, tui.read_agents(str(ad)), "main")
+    row = [l for l in block.splitlines() if l.startswith("| coder |")][0]
+    assert "none -- fails instead" not in row
+
+
+def test_read_live_deeply_nested_json_does_not_crash(tmp_path):
+    p = tmp_path / "live-upstreams.json"
+    p.write_text("[" * 100000, encoding="utf-8")
+    assert tui.read_live(str(p)) == {}
+
+
+def test_read_prefs_deeply_nested_json_does_not_crash(tmp_path):
+    p = tmp_path / "tui-prefs.json"
+    p.write_text('{"band": ' + "[" * 100000, encoding="utf-8")
+    assert tui.read_prefs(str(p)) == {}
+
+
+def test_no_literal_bom_in_sources():
+    for name in ("tui.py", "test_tui_fleet.py"):
+        with open(os.path.join(HERE, name), encoding="utf-8") as f:
+            assert "\ufeff" not in f.read(), name
