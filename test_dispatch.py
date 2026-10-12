@@ -135,6 +135,20 @@ def test_kimi_quota_403_fails_over(monkeypatch):
     assert recs[-1]["status"] == 200
 
 
+def test_kimi_k3_quota_403_does_not_spill_onto_metered_hop(monkeypatch):
+    # Real catalog: kimi/k3 chains to moonshotai/kimi-k3 ($3/$15 per 1M, metered).
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, QUOTA_403), 200))
+    models = r.attempts_for("kimi/k3", r.POLICY_DEFAULT, False)
+    atts = [dict(upstream=r.upstream_for(m), model=m, host="h", headers={},
+                 path="/v1/messages", body=b"") for m in models]
+    assert r.metered(models[1])
+    h.relay("POST", atts, run="")
+    assert "failed_over_to" not in recs[0]
+    assert recs[0]["status"] == 403
+    assert h.wfile.getvalue() == QUOTA_403
+
+
 def test_kimi_403_without_usage_limit_stays(monkeypatch):
     recs = []
     h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, ACCESS_403), 200))

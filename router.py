@@ -1534,7 +1534,10 @@ class Router(BaseHTTPRequestHandler):
             body, quota = sniff_403(att, resp)
             if body is not None:
                 rec["error"] = gemma_error_text(body)     # what the 403 said (#68)
-            status = 429 if quota else resp.status
+            # A quota 403 counts as a 429 only where the walk can go on to a
+            # plan-billed hop; onto a metered one it stays a 403 (no silent cash, #68).
+            quota_moves = quota and (last or not metered(prepared[i + 1]["model"]))
+            status = 429 if quota_moves else resp.status
             if status in FAILOVER_STATUSES and not last:
                 rec.update(status=resp.status, failed_over_to=prepared[i + 1]["model"],
                            ms=int((time.time() - t0) * 1000))
