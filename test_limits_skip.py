@@ -24,8 +24,6 @@ def reset_state():
     for name in ("SKIP_UNTIL", "LIVE"):
         if hasattr(r, name):
             getattr(r, name).clear()
-    if hasattr(r, "SPEND_CACHE"):
-        r.SPEND_CACHE.update(at=-1e9, date="", total=0.0)
 
 
 @pytest.fixture(autouse=True)

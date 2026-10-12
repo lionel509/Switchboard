@@ -943,7 +943,6 @@ LIMIT_DEFAULTS = {
 WORKER_PREFIXES = ("claude-haiku-", "claude-sonnet-")
 SKIP_UNTIL = {}                    # model -> epoch until which it stays out
 SKIP_LOCK = threading.Lock()
-SPEND_CACHE = {"at": -1e9, "date": "", "total": 0.0}
 LIVE = {}                          # head model -> {"model": served, "ts": ...}
 
 
@@ -967,18 +966,22 @@ def limits_file(upstream):
 
 def to_epoch(v):
     """A reset or ts as epoch seconds. The status line writes epoch strings, the
-    kimi file writes ISO-8601 UTC. None when missing or unreadable."""
-    if _num(v):
-        return float(v)
-    if not isinstance(v, str) or not v.strip():
-        return None
-    s = v.strip()
-    if s.replace(".", "", 1).isdigit():
-        return float(s)
+    kimi file writes ISO-8601 UTC. None when missing, unreadable, non-finite, or
+    outside [0, 1e11) (a millisecond epoch lands far past that)."""
     try:
-        return float(calendar.timegm(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")))
-    except ValueError:
+        if _num(v):
+            t = float(v)
+        elif isinstance(v, str) and v.strip():
+            s = v.strip()
+            if s.isascii() and s.replace(".", "", 1).isdigit():
+                t = float(s)
+            else:
+                t = float(calendar.timegm(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")))
+        else:
+            return None
+    except (ValueError, OverflowError):
         return None
+    return t if 0 <= t < 1e11 else None
 
 
 def read_limits(upstream, now):
@@ -991,7 +994,7 @@ def read_limits(upstream, now):
     if not isinstance(d, dict):
         return None
     ts = to_epoch(d.get("ts"))
-    if ts is None or now - ts > limit_setting("stale_minutes") * 60:
+    if ts is None or abs(now - ts) > limit_setting("stale_minutes") * 60:
         return None
     return d
 
@@ -1028,7 +1031,7 @@ def mark_429(model, resp, now=None):
         return
     now = time.time() if now is None else now
     ra = resp.getheader("retry-after")
-    if isinstance(ra, str) and ra.strip().isdigit():
+    if isinstance(ra, str) and ra.strip().isascii() and ra.strip().isdigit():
         secs = int(ra.strip())
     else:
         secs = limit_setting("cooloff_minutes") * 60
@@ -1038,11 +1041,9 @@ def mark_429(model, resp, now=None):
 
 def fallback_spent_today():
     """Sum of cost over today's fallback rows (failover_from set). The ledger's ts
-    is local time, so today is the local date. Numeric costs only; cached 60 s."""
+    is local time, so today is the local date. Finite positive numeric costs only.
+    Uncached: a scan is about 0.04 s, and a cache would hide spend made inside it."""
     today = time.strftime("%Y-%m-%d")
-    with SKIP_LOCK:
-        if SPEND_CACHE["date"] == today and time.monotonic() - SPEND_CACHE["at"] < 60:
-            return SPEND_CACHE["total"]
     total = 0.0
     try:
         with open(LOGFILE, "rb") as f:
@@ -1054,12 +1055,10 @@ def fallback_spent_today():
                 except ValueError:
                     continue
                 if (isinstance(rec, dict) and str(rec.get("ts", ""))[:10] == today
-                        and _num(rec.get("cost"))):
+                        and _num(rec.get("cost")) and 0 < rec["cost"] < float("inf")):
                     total += rec["cost"]
     except OSError:
         total = 0.0
-    with SKIP_LOCK:
-        SPEND_CACHE.update(at=time.monotonic(), date=today, total=total)
     return total
 
 

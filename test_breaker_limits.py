@@ -92,7 +92,6 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setitem(r.CATALOG, "turn_caps", {})
     r.SKIP_UNTIL.clear()
     r.LIVE.clear()
-    r.SPEND_CACHE.update(at=-1e9, date="", total=0.0)
     yield tmp_path
 
 
