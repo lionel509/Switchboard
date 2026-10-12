@@ -246,7 +246,7 @@ def test_fleet_block_is_deterministic_and_flags_metered_hops():
 def test_splice_block_appends_when_no_markers():
     b = tui.fleet_block(fixture_cat(), AGENTS, "opus")
     assert tui.splice_block("", b) == b + "\n"
-    assert tui.splice_block("hello\n", b) == "hello\n" + b + "\n"
+    assert tui.splice_block("hello\n", b) == "hello\n\n" + b + "\n"
     assert tui.splice_block("hello", b) == "hello\n\n" + b + "\n"
     assert tui.splice_block("hello\n\n", b) == "hello\n\n" + b + "\n"
 
