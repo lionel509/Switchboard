@@ -610,13 +610,23 @@ HEAD_SEP = "  \u00b7  "
 
 
 def fit_head(text, width):
-    """A section heading that fits in `width`: whole parts (split on the middle dot)
-    drop from the right; a single part still too long ends with an ellipsis."""
+    """A section heading that fits in `width`, cut only at whole boundaries. Whole
+    middle-dot segments drop from the right. A segment that is still too long keeps
+    its whole words, then a standalone ellipsis marks what was dropped. A word that
+    cannot fit at all is dropped and marked the same way."""
     parts = text.split(HEAD_SEP)
     while len(HEAD_SEP.join(parts)) > width and len(parts) > 1:
         parts.pop()
-    return _clip(HEAD_SEP.join(parts), width)
-
+    head = HEAD_SEP.join(parts)
+    if len(head) <= width:
+        return head
+    best = ""
+    for m in re.finditer(r"\S+", head):
+        cand = head[:m.end()] + " \u2026"
+        if len(cand) > width:
+            break
+        best = cand
+    return best or ("\u2026" if width >= 1 else "")
 
 def fit_hints(pairs, width):
     """The footer hints that fit in `width`. A hint is dropped whole, from the right;
