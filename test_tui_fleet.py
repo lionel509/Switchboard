@@ -815,16 +815,22 @@ def test_table_and_band_agree_on_the_tier_id(c):
     assert "opus-5\u00b7opus-5-5" in band
 
 
-def test_fit_head_drops_whole_parts_then_ellipsis():
+def test_fit_head_drops_whole_parts_then_whole_words():
     assert tui.fit_head("aa  \u00b7  bbbb", 3) == "aa"
     assert tui.fit_head("aa  \u00b7  bbbb", 20) == "aa  \u00b7  bbbb"
-    assert tui.fit_head("abcdefgh", 5) == "abcd\u2026"
+    assert tui.fit_head("ab cd efgh", 7) == "ab cd \u2026"       # whole words, then a marker
+    assert tui.fit_head("abcdefgh", 5) == "\u2026"                # one word that cannot fit: marked, not cut
 
 
-@pytest.mark.parametrize("w", WIDTHS)
+@pytest.mark.parametrize("w", range(60, 201))
 def test_fleet_header_is_never_cut_mid_word(w):
-    u = fleet_ui(5)
+    """Independent of fit_head: every token drawn is a whole token of the full
+    heading, or a standalone ellipsis marking dropped words or segments."""
+    full = fleet_ui(5).rows[0][1]
     rows = drawn(w, page=5)
     list_w = w - max(30, min(40, w // 3)) - 1 if w >= 92 else w
     edge = list_w - 1
-    assert rows[2][3:edge].rstrip() == tui.fit_head(u.rows[0][1], edge - 3)
+    shown = rows[2][3:edge].rstrip().split()
+    whole = set(full.split())
+    for token in shown:
+        assert token in whole or token == "\u2026", (w, rows[2][3:edge].rstrip())
