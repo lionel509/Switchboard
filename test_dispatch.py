@@ -58,6 +58,8 @@ def relay_stub(monkeypatch, recs, statuses=(429, 429)):
     monkeypatch.setattr(r, "log_request", recs.append)
     monkeypatch.setattr(r, "take_turn", lambda model: True)
     monkeypatch.setattr(r, "maybe_fetch_quota", lambda upstream: None)
+    # a 429 is remembered across relay() calls (#56); each stub starts clean
+    monkeypatch.setattr(r, "SKIP_UNTIL", {})
     it = iter(statuses)
     h.issue = lambda method, att, rec: (FakeConn(), FakeResp(next(it)))
     h.fail = lambda code, msg: ("fail", code, msg)
