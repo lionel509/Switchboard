@@ -1058,7 +1058,12 @@ def sniff_403(att, resp):
     n = resp.getheader("content-length")
     if n is None or not str(n).isdigit() or int(n) > SNIFF_LIMIT:
         return None, False
-    body = resp.read()
+    try:
+        body = resp.read()
+    except Exception:
+        # Truncated mid-body: the text is unknown. Treat it as quota so the walk
+        # can move on; quota_moves still limits that to plan-billed hops. (#68)
+        return None, True
     text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
     return body, bool(KIMI_QUOTA_403.search(text))
 
