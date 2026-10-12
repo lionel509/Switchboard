@@ -284,8 +284,31 @@ def test_splice_property():
         assert tui.splice_block(out, b2) == out
 
 
+_FM_LINE = re.compile(r"([A-Za-z_][\w-]*):(?:[ \t]+(.*?))?[ \t]*")
+
+
+def _fm(text):
+    """The frontmatter's keys, read the way a strict YAML reader reads simple
+    `key: value` lines. A line that is not one (`model:haiku`) raises, as YAML would."""
+    lines = text.splitlines()
+    assert lines and lines[0] == "---", text[:40]
+    out = {}
+    for line in lines[1:lines.index("---", 1)]:
+        m = _FM_LINE.fullmatch(line)
+        if m is None:
+            raise AssertionError("not frontmatter YAML: %r" % line)
+        value = re.sub(r"(^|[ \t])#.*$", "", m.group(2) or "").strip().strip("\"'")
+        out[m.group(1)] = value or None
+    return out
+
+
 FM_LINES = ["name: coder", "description: Writes code: one unit", "tools: Read, Edit", "color: green"]
 BODY_LINES = ["# Body", "model: opus", "", "---", "tools: nope"]
+
+
+MODEL_LINES = ["model: haiku", "model: opus", "model: x", "model:", "model:   ",
+               "model: # c", "model:  sonnet  # c"]
+SIMPLE_MODEL = ("model: haiku", "model: opus", "model: x")
 
 
 def test_set_model_line_property():
@@ -294,19 +317,27 @@ def test_set_model_line_property():
         eol = rng.choice(["\n", "\r\n"])
         fm = rng.sample(FM_LINES, rng.randint(0, len(FM_LINES)))
         if rng.random() < 0.7:
-            fm.insert(rng.randint(0, len(fm)), "model: " + rng.choice(["haiku", "opus", "x"]))
+            fm.insert(rng.randint(0, len(fm)), rng.choice(MODEL_LINES))
         body = rng.sample(BODY_LINES, rng.randint(0, len(BODY_LINES)))
         text = "---" + eol + "".join(l + eol for l in fm) + "---" + eol + "".join(l + eol for l in body)
         alias = rng.choice(tui.ALIASES)
         lines = text.splitlines(keepends=True)
         close = next(i for i in range(1, len(lines)) if lines[i].rstrip("\r\n") == "---")
         model_at = next((i for i in range(1, close) if lines[i].startswith("model:")), None)
-        if model_at is None:
-            expected = lines[:close] + ["model: " + alias + eol] + lines[close:]
-        else:
-            expected = list(lines)
-            expected[model_at] = "model: " + alias + eol
-        assert "".join(expected) == tui.set_model_line(text, alias)
+        out = tui.set_model_line(text, alias)
+        assert _fm(out)["model"] == alias                  # the rewritten frontmatter parses
+        if model_at is None or lines[model_at].rstrip("\r\n") not in SIMPLE_MODEL:
+            # a comment, an empty value or stray spacing: only the model line may change
+            out_lines = out.splitlines(keepends=True)
+            if model_at is None:
+                assert out_lines == lines[:close] + ["model: " + alias + eol] + lines[close:]
+            else:
+                assert len(out_lines) == len(lines)
+                assert out_lines[:model_at] + out_lines[model_at + 1:] == lines[:model_at] + lines[model_at + 1:]
+            continue
+        expected = list(lines)
+        expected[model_at] = "model: " + alias + eol
+        assert "".join(expected) == out
 
 
 # --- writing ---------------------------------------------------------------
@@ -601,3 +632,20 @@ def test_no_literal_bom_in_sources():
     for name in ("tui.py", "test_tui_fleet.py"):
         with open(os.path.join(HERE, name), encoding="utf-8") as f:
             assert "\ufeff" not in f.read(), name
+
+
+# --- review round 3 (PR #59): empty model: values keep the space after the colon ---
+
+def test_break_empty_model_line_keeps_space_after_colon():
+    text = "---\nname: coder\nmodel:\n---\nbody\n"
+    assert tui.set_model_line(text, "haiku") == "---\nname: coder\nmodel: haiku\n---\nbody\n"
+
+
+def test_break_empty_model_line_frontmatter_still_parses_as_model_haiku():
+    out = tui.set_model_line("---\nname: coder\nmodel:\n---\nbody\n", "haiku")
+    assert _fm(out) == {"name": "coder", "model": "haiku"}
+
+
+def test_break_empty_model_line_crlf_keeps_space_after_colon():
+    text = "---\r\nname: coder\r\nmodel:\r\n---\r\nbody\r\n"
+    assert tui.set_model_line(text, "haiku") == "---\r\nname: coder\r\nmodel: haiku\r\n---\r\nbody\r\n"
