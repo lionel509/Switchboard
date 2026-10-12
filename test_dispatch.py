@@ -625,11 +625,22 @@ class TruncatedQuotaResp(FakeResp):
         raise http.client.IncompleteRead(QUOTA_403[:20], len(QUOTA_403) - 20)
 
 
-def test_truncated_quota_403_body_does_not_crash_relay(monkeypatch):
+def test_truncated_quota_403_body_is_502_not_failover(monkeypatch):
     recs = []
-    h = relay_stub(monkeypatch, recs, statuses=(TruncatedQuotaResp(403, QUOTA_403), 200))
-    atts = [dict(PREPARED[1]), dict(PREPARED[0])]
-    out = h.relay("POST", atts, run="")
-    assert out is None
-    assert recs[0]["failed_over_to"] == "claude-sonnet-5"
-    assert recs[-1]["status"] == 200
+    h = relay_stub(monkeypatch, recs, statuses=(TruncatedQuotaResp(403, QUOTA_403),))
+    out = h.relay("POST", [dict(PREPARED[1])], run="")
+    assert out[:2] == ("fail", 502)
+    assert "failed_over_to" not in recs[0]
+
+
+class TruncatedAccessResp(FakeResp):
+    def read(self, *a):
+        raise http.client.IncompleteRead(ACCESS_403[:20], len(ACCESS_403) - 20)
+
+
+def test_truncated_access_403_must_not_drain_plan(monkeypatch):
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(TruncatedAccessResp(403, ACCESS_403), 200))
+    out = h.relay("POST", [dict(p) for p in KIMI_FIRST], run="")
+    assert out[:2] == ("fail", 502)
+    assert "failed_over_to" not in recs[0]
