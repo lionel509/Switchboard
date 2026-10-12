@@ -1,5 +1,5 @@
 """Headless dispatch tiers (#46). Run: python3 -m pytest test_dispatch.py"""
-import importlib.util, io, json, os, subprocess, sys, time, types
+import http.client, importlib.util, io, json, os, subprocess, sys, time, types
 
 spec = importlib.util.spec_from_file_location(
     "_r", os.path.join(os.path.dirname(os.path.abspath(__file__)), "router.py"))
@@ -618,3 +618,18 @@ def test_run_missing_dir_is_a_message(monkeypatch, tmp_path, capsys):
     h.args.dir = str(tmp_path / "nope")
     assert d.run(h.args) == 1
     assert "no such folder" in capsys.readouterr().err
+
+
+class TruncatedQuotaResp(FakeResp):
+    def read(self, *a):
+        raise http.client.IncompleteRead(QUOTA_403[:20], len(QUOTA_403) - 20)
+
+
+def test_truncated_quota_403_body_does_not_crash_relay(monkeypatch):
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(TruncatedQuotaResp(403, QUOTA_403), 200))
+    atts = [dict(PREPARED[1]), dict(PREPARED[0])]
+    out = h.relay("POST", atts, run="")
+    assert out is None
+    assert recs[0]["failed_over_to"] == "claude-sonnet-5"
+    assert recs[-1]["status"] == 200
