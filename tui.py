@@ -501,20 +501,19 @@ def tier_of(cat, model):
 
 
 def tier_chain(cat, model):
-    """[newest head id, *chain] for this model's tier: the last id of the band line the
-    tier's first row with a chain sits on, so the table names what the band shows."""
+    """[the tier's own last-listed id, *chain]. Among the catalog rows of this model's
+    tier that share the tier's first chain, the last one listed. A band line can merge
+    tiers that share a chain, so the id is never taken from the merged line."""
     tier = tier_of(cat, model)
     if tier is None:
         return []
-    groups = chain_groups(cat)
-    for m in _models(cat):
-        if m.get("tier") == tier:
-            chain = chain_for(cat, m["id"])
-            if chain:
-                heads = next((h for h, t in groups if t == chain and m["id"] in h), [m["id"]])
-                return [heads[-1]] + chain
-    return []
-
+    rows = _models(cat)
+    first = next((chain_for(cat, m["id"]) for m in rows
+                  if m.get("tier") == tier and chain_for(cat, m["id"])), None)
+    if not first:
+        return []
+    own = [m["id"] for m in rows if m.get("tier") == tier and chain_for(cat, m["id"]) == first]
+    return [own[-1]] + first
 
 def _short(mid):
     return mid[len("claude-"):] if mid.startswith("claude-") else mid
@@ -605,6 +604,18 @@ def band_lines(cat, live, agents, main, frame, width=None):
     else:
         lines.extend(_wrap_units(units, width))
     return lines
+
+
+HEAD_SEP = "  \u00b7  "
+
+
+def fit_head(text, width):
+    """A section heading that fits in `width`: whole parts (split on the middle dot)
+    drop from the right; a single part still too long ends with an ellipsis."""
+    parts = text.split(HEAD_SEP)
+    while len(HEAD_SEP.join(parts)) > width and len(parts) > 1:
+        parts.pop()
+    return _clip(HEAD_SEP.join(parts), width)
 
 
 def fit_hints(pairs, width):
@@ -1178,7 +1189,7 @@ class UI(object):
             self.put(y, 1, "\u258c" if cur else " ", attr("sel"))
             x, edge = 3, list_w - 1
             if kind == "head":
-                self.put(y, x, payload, attr("head"), edge)
+                self.put(y, x, fit_head(payload, edge - x), attr("head"), edge)
             elif kind in ("blank", "note"):
                 self.put(y, x, payload, attr("note"), edge)
             elif kind == "up":
