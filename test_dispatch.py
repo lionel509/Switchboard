@@ -140,7 +140,7 @@ def test_kimi_k3_quota_403_does_not_spill_onto_metered_hop(monkeypatch):
     recs = []
     h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, QUOTA_403), 200))
     models = r.attempts_for("kimi/k3", r.POLICY_DEFAULT, False)
-    atts = [dict(upstream=r.upstream_for(m), model=m, host="h", headers={},
+    atts = [dict(upstream=r.upstream_for(m).split(":")[-1], model=m, host="h", headers={},
                  path="/v1/messages", body=b"") for m in models]
     assert r.metered(models[1])
     h.relay("POST", atts, run="")
