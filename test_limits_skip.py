@@ -545,3 +545,68 @@ def test_quoted_stale_minutes_still_skips(monkeypatch):
     write_limits("anthropic", claude_snapshot(seven=100))
     calls, _ = run({KIMI: 200}, chain=[(HAIKU, "anthropic"), (KIMI, "kimi")])
     assert calls == [KIMI]
+
+
+# --- review round 3 (PR #57) ----------------------------------------------
+# The breaker's round-3 bodies, verbatim, over this file's autouse isolation
+# fixture (LOGFILE is a tmp path there).
+
+def write_kimi(tmp_path, body=None, five=100.0):
+    path = tmp_path / "kimi-limits.json"
+    if body is None:
+        body = {"ts": time.time(), "five_hour_pct": five,
+                "five_hour_resets_at": time.time() + 3600}
+    path.write_text(body if isinstance(body, str) else json.dumps(body))
+    return path
+
+
+def default_gate_reason(now):
+    return "kimi five_hour_pct=100.0 until " + r._iso(now + 3600)
+
+
+def test_breaker_gate_value_not_list_crashes(tmp_path, monkeypatch):
+    monkeypatch.setitem(r.CATALOG, "limits", {"gate": {"kimi": 5}})
+    now = time.time()
+    write_kimi(tmp_path)
+    assert r.skip_reason(KIMI, "kimi", now) == default_gate_reason(now)
+
+
+def test_breaker_gate_list_of_ints_crashes(tmp_path, monkeypatch):
+    monkeypatch.setitem(r.CATALOG, "limits", {"gate": {"kimi": [1]}})
+    now = time.time()
+    write_kimi(tmp_path)
+    assert r.skip_reason(KIMI, "kimi", now) == default_gate_reason(now)
+
+
+def test_breaker_gate_string_silently_disables(tmp_path, monkeypatch):
+    monkeypatch.setitem(r.CATALOG, "limits", {"gate": {"kimi": "five_hour_pct"}})
+    now = time.time()
+    write_kimi(tmp_path)
+    assert r.skip_reason(KIMI, "kimi", now) == default_gate_reason(now)
+
+
+def test_breaker_retry_after_huge_digits_crashes(tmp_path):
+    class R:
+        def getheader(self, name, default=None):
+            return "9" * 5000 if name == "retry-after" else default
+    now = time.time()
+    r.mark_429(KIMI, R(), now=now)  # expected: cool-off default, no exception
+    assert r.SKIP_UNTIL[KIMI] == pytest.approx(now + 15 * 60)
+
+
+def test_breaker_deep_json_limits_file_crashes(tmp_path):
+    write_kimi(tmp_path, "[" * 200000 + "]" * 200000)
+    assert r.skip_reason(KIMI, "kimi", time.time()) is None
+
+
+def test_deep_json_ledger_line_does_not_crash(tmp_path):
+    with open(r.LOGFILE, "a") as f:
+        f.write('{"failover_from": ' + "[" * 200000 + "]" * 200000 + "}\n")
+    assert r.fallback_spent_today() == 0.0
+
+
+def test_breaker_cash_cap_float_sum_at_boundary(tmp_path):
+    today = time.strftime("%Y-%m-%d")
+    rows = [{"ts": today + "T10:00:00", "failover_from": "x", "cost": 0.1}] * 50
+    (tmp_path / "requests.log").write_text("".join(json.dumps(x) + "\n" for x in rows))
+    assert r.fallback_spent_today() >= 5.0
