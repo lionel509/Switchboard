@@ -3,7 +3,7 @@
 Nothing here touches the real ~/.claude or models.json: every path the TUI
 writes is monkeypatched into tmp_path by the autouse fixture.
 """
-import importlib.util, json, os, random, sys
+import importlib.util, json, os, random, re, stat, sys
 
 import pytest
 
@@ -417,3 +417,138 @@ def test_band_toggle_hides_and_survives_restart():
     assert again.band_on is False
     again.toggle_band()
     assert tui.UI(StubSB(), None).band_on is True
+
+
+# --- review round 1 (PR #59): adopted breaker tests and their siblings ---------
+
+cat = fixture_cat()
+
+
+def test_crlf_file_stays_crlf_after_append():
+    text = "# Notes\r\nkeep me\r\n"
+    out = tui.splice_block(text, tui.fleet_block(cat, [("coder", "haiku")], "opus"))
+    assert not re.findall(r"(?<!\r)\n", out)
+
+
+def test_crlf_file_stays_crlf_inside_markers():
+    text = "# Notes\r\n%s\r\nold\r\n%s\r\nafter\r\n" % (MS, ME)
+    out = tui.splice_block(text, tui.fleet_block(cat, [("coder", "haiku")], "opus"))
+    assert not re.findall(r"(?<!\r)\n", out)
+    assert out.startswith("# Notes\r\n" + MS + "\r\n") and out.endswith(ME + "\r\nafter\r\n")
+
+
+def test_bom_agent_file_model_is_read():
+    assert tui._model_of("﻿---\nname: x\nmodel: sonnet\n---\nbody\n") == "sonnet"
+
+
+def test_bom_agent_file_can_be_set():
+    out = tui.set_model_line("﻿---\nname: x\nmodel: sonnet\n---\nbody\n", "opus")
+    assert out.startswith("﻿---\n") and "model: opus\n" in out and "model: sonnet" not in out
+
+
+def test_unreadable_agent_row_not_silently_dropped(tmp_path):
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    (agents / "a.md").write_text("---\nname: a\nmodel: haiku\n---\n")
+    b = agents / "b.md"
+    b.write_text("---\nname: b\nmodel: opus\n---\n")
+    md = tmp_path / "CLAUDE.md"
+    os.chmod(b, 0)
+    try:
+        tui.write_fleet(str(agents), str(md), cat, "opus", "a", "sonnet")
+    finally:
+        os.chmod(b, 0o644)
+    assert "| b |" in md.read_text(encoding="utf-8")
+
+
+def test_unreadable_agent_cannot_be_set_and_writes_nothing(tmp_path):
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    b = agents / "b.md"
+    b.write_text("---\nmodel: opus\n---\n")
+    md = tmp_path / "CLAUDE.md"
+    os.chmod(b, 0)
+    try:
+        with pytest.raises(OSError):
+            tui.write_fleet(str(agents), str(md), cat, "opus", "b", "haiku")
+    finally:
+        os.chmod(b, 0o644)
+    assert not md.exists()
+
+
+def test_failed_claude_md_write_leaves_agent_file_unchanged(tmp_path):
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    agent = agents / "coder.md"
+    agent.write_text("---\nname: coder\nmodel: haiku\n---\nbody\n")
+    md_dir = tmp_path / "ro"
+    md_dir.mkdir()
+    md = md_dir / "CLAUDE.md"
+    md.write_text("# top\n%s\nold\n%s\n" % (MS, ME))
+    os.chmod(md_dir, 0o555)
+    try:
+        with pytest.raises(OSError):
+            tui.write_fleet(str(agents), str(md), cat, "opus", "coder", "sonnet")
+    finally:
+        os.chmod(md_dir, 0o755)
+    assert agent.read_text() == "---\nname: coder\nmodel: haiku\n---\nbody\n"
+
+
+def test_failover_not_a_list_does_not_crash_band():
+    tui.band_lines({"models": [{"id": "claude-haiku-5-5", "failover": 5}]}, {}, [], "opus", 0)
+
+
+def test_failover_null_entry_in_models_list_does_not_crash():
+    tui.band_lines({"models": [None, {"id": "claude-haiku-5-5", "failover": ["kimi/k2.8"]},
+                               {"id": "kimi/k2.8"}]}, {}, [], "opus", 0)
+
+
+def test_failover_list_with_junk_entries_keeps_the_good_ones():
+    c = {"models": [{"id": "claude-haiku-5-5", "failover": [["x"], 3, "kimi/k2.8"]},
+                    {"id": "kimi/k2.8"}]}
+    lines = tui.band_lines(c, {}, [], "opus", 0)
+    assert "kimi/k2.8" in "".join(t for t, _ in lines[0])
+
+
+def test_both_files_untouched_when_claude_md_write_fails(tmp_path):
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    agent = agents / "coder.md"
+    agent.write_text("---\nname: coder\nmodel: haiku\n---\nbody\n")
+    md_dir = tmp_path / "ro"
+    md_dir.mkdir()
+    md = md_dir / "CLAUDE.md"
+    md.write_text("# top\n%s\nold\n%s\n" % (MS, ME))
+    os.chmod(md_dir, 0o555)
+    try:
+        with pytest.raises(OSError):
+            tui.write_fleet(str(agents), str(md), cat, "opus", "coder", "sonnet")
+    finally:
+        os.chmod(md_dir, 0o755)
+    assert agent.read_text() == "---\nname: coder\nmodel: haiku\n---\nbody\n"
+
+
+def test_agent_model_with_a_marker_refuses_and_leaves_claude_md_alone(tmp_path):
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    (agents / "a.md").write_text("---\nmodel: haiku\n---\n")
+    (agents / "b.md").write_text("---\nmodel: " + ME + "\n---\n")
+    md = tmp_path / "CLAUDE.md"
+    md.write_text("# top\n")
+    with pytest.raises(ValueError):
+        tui.write_fleet(str(agents), str(md), cat, "opus", "a", "sonnet")
+    assert md.read_text() == "# top\n"
+
+
+def test_write_keeps_file_modes(tmp_path):
+    agents = tmp_path / "agents"
+    agents.mkdir()
+    agent = agents / "coder.md"
+    agent.write_text(CODER_MD)
+    md = tmp_path / "CLAUDE.md"
+    md.write_text("# top\n")
+    os.chmod(agent, 0o600)
+    os.chmod(md, 0o600)
+    tui.write_fleet(str(agents), str(md), cat, "opus", "coder", "sonnet")
+    assert stat.S_IMODE(os.stat(agent).st_mode) == 0o600
+    assert stat.S_IMODE(os.stat(md).st_mode) == 0o600
