@@ -45,11 +45,11 @@ GEMMA_LOCAL = os.environ.get("CLAUDE_ROUTER_GEMMA_LOCAL", "http://127.0.0.1:8000
 GEMMA_OR_MODEL = "google/gemma-4-31b-it"
 
 
-# Pinned to Reka ($0.08/$0.30 per 1M, the cheapest of 15 providers on 2026-09-28)
-# with no fallback, by Lionel's call: an outage fails the call instead of moving
-# to a pricier provider. zdr stays as a guard: if Reka stops qualifying, calls fail
+# Pinned to DeepInfra ($0.09/$0.34 per 1M), re-pinned 2026-10-17 because Reka dropped
+# Gemma 4. No fallback, by Lionel's call: an outage fails the call instead of moving
+# to a pricier provider. zdr stays as a guard: if DeepInfra stops qualifying, calls fail
 # rather than reaching a provider that retains.
-GEMMA_OR_PROVIDER = {"only": ["reka"], "allow_fallbacks": False, "zdr": True}
+GEMMA_OR_PROVIDER = {"only": ["deepinfra"], "allow_fallbacks": False, "zdr": True}
 
 
 # /gemma/kaggle: a fast, free stand-in for Gemma while iterating on the agent
