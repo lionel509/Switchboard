@@ -14,3 +14,7 @@ def test_gemma_or_body_renames_the_model_and_pins_reka_with_no_fallback():
     assert out["provider"] == {"only": ["reka"], "allow_fallbacks": False, "zdr": True}
     assert out["messages"] == req["messages"] and out["tools"] == []
     assert req["model"] == "gemma-4-31b-it-qat-w4a16-ct"          # caller's dict untouched
+
+
+def test_gemma_or_provider_is_pinned_to_deepinfra_with_no_fallback():
+    assert r.GEMMA_OR_PROVIDER == {"only": ["deepinfra"], "allow_fallbacks": False, "zdr": True}
