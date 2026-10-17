@@ -18,3 +18,9 @@ def test_gemma_or_body_renames_the_model_and_pins_deepinfra_with_no_fallback():
 
 def test_gemma_or_provider_is_pinned_to_deepinfra_with_no_fallback():
     assert r.GEMMA_OR_PROVIDER == {"only": ["deepinfra"], "allow_fallbacks": False, "zdr": True}
+
+
+def test_gemma_or_body_docstring_does_not_claim_cheapest_provider():
+    # Reka was the cheapest; DeepInfra is not, so the docstring must not say CHEAPEST.
+    doc = r.gemma_or_body.__doc__ or ""
+    assert "CHEAPEST" not in doc
