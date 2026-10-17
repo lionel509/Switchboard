@@ -87,9 +87,10 @@ def gemma_error_text(data):
 
 def gemma_or_body(req):
     """The harness request as sent to OpenRouter: the real model name, and the
-    CHEAPEST zero-retention provider. Providers of this one model ranged
-    $0.08-$0.75/1M input on 2026-09-28, and left to OpenRouter 42% of calls
-    landed above $0.09 -- a quarter of the day's spend for the same tokens."""
+    provider pinned in GEMMA_OR_PROVIDER, with no fallback. Providers of this
+    one model ranged $0.08-$0.75/1M input on 2026-09-28, and left to OpenRouter
+    42% of calls landed above $0.09 -- a quarter of the day's spend for the
+    same tokens, which is why the route is pinned rather than left to sort."""
     return dict(req, model=GEMMA_OR_MODEL, provider=GEMMA_OR_PROVIDER)
 
 CATALOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "models.json")
