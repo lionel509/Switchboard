@@ -10,7 +10,8 @@
     },
     "~/Documents/Vanguard": {
       "data": "claude",
-      "_why": "Highest security. Off-limits to Claude sessions by CLAUDE.md anyway; this is the wire-level backstop."
+      "_why": "Highest security. Off-limits to Claude sessions by CLAUDE.md anyway; this is the wire-level backstop.",
+      "effort": "xhigh"
     },
     "~/Documents/State Street": {
       "data": "zdr",
@@ -144,7 +145,8 @@
       "kimi/k3",
       "~z-ai/glm-latest",
       "kimi/k2.8",
-      "kimi/k3-256k"
+      "kimi/k3-256k",
+      "xiaomi/mimo-v2.6-flash"
     ]
   },
   "_lineup_note": "Used by 'picker --apply': the WHOLE /model menu, in order, weighted by how likely each is to be picked by hand. Ten rows is the limit before Claude Code collapses the rest behind '… +N models'. A row with only a 'model' key fills its label and description from the catalog (blurb + price); give label/description explicitly for Claude ids, which are not catalog entries. Anything left out is still routable by Auto.",
@@ -168,9 +170,9 @@
       "model": "~x-ai/grok-latest"
     },
     {
-      "model": "haiku",
-      "label": "Haiku",
-      "description": "Quick answers and light tool use · plan quota"
+      "model": "anthropic/claude-haiku-5.5",
+      "label": "Anthropic: Claude Haiku 5.5",
+      "description": "Quick answers and light tool use · OpenRouter · $0.1/$0.5 per 1M"
     },
     {
       "model": "~fam/mimo",
@@ -188,14 +190,17 @@
     },
     {
       "model": "deepseek/deepseek-v4-pro"
+    },
+    {
+      "model": "xiaomi/mimo-v2.6-flash"
     }
   ],
   "_failover_note": "On 402/429/529 the router retries the next model here before answering. 401/403 is NOT included: a bad credential must never silently drain a different quota. A target containing '/' is METERED — failing over to one spends cash, so these are set deliberately, not by default.",
   "failover_default": [],
   "models": [
     {
-      "id": "claude-haiku-4-5-20251001",
-      "name": "Claude Haiku",
+      "id": "claude-haiku-5-5",
+      "name": "Claude Haiku 5.5",
       "family": "claude",
       "tier": "haiku",
       "billing": "subscription",
@@ -208,7 +213,7 @@
       "blurb": "Quick answers and light tool use",
       "failover": [
         "kimi/k2.8",
-        "~deepseek/deepseek-v4-flash-latest"
+        "xiaomi/mimo-v2.6-pro"
       ]
     },
     {
@@ -226,7 +231,43 @@
       "blurb": "Fast workhorse for routine coding",
       "failover": [
         "kimi/k2.8",
-        "~deepseek/deepseek-v4-flash-latest"
+        "xiaomi/mimo-v2.6-pro"
+      ]
+    },
+    {
+      "id": "claude-sonnet-5-5",
+      "name": "Claude Sonnet 5.5",
+      "family": "claude",
+      "tier": "sonnet",
+      "billing": "subscription",
+      "price": [
+        0,
+        0
+      ],
+      "context": 1000000,
+      "good_at": "the reliable default for real coding and agentic tool use, with no cash cost. Costs subscription quota.",
+      "blurb": "Fast workhorse for routine coding",
+      "failover": [
+        "kimi/k2.8",
+        "xiaomi/mimo-v2.6-pro"
+      ]
+    },
+    {
+      "id": "claude-fable-5-1",
+      "name": "Claude Fable 5.1",
+      "family": "claude",
+      "tier": "fable",
+      "billing": "subscription",
+      "price": [
+        0,
+        0
+      ],
+      "context": 1000000,
+      "good_at": "planning and hard judgment calls, with no cash cost. Costs subscription quota.",
+      "blurb": "Top-tier planner",
+      "failover": [
+        "kimi/k2.8",
+        "xiaomi/mimo-v2.6-pro"
       ]
     },
     {
@@ -243,9 +284,8 @@
       "good_at": "hardest reasoning and large multi-file refactors, with no cash cost. Costs the most subscription quota.",
       "blurb": "Deep reasoning and big refactors",
       "failover": [
-        "claude-sonnet-5",
         "kimi/k2.8",
-        "~deepseek/deepseek-v4-flash-latest"
+        "xiaomi/mimo-v2.6-pro"
       ]
     },
     {
@@ -262,9 +302,8 @@
       "good_at": "hardest reasoning and large multi-file refactors, with no cash cost. Costs the most subscription quota.",
       "blurb": "Deep reasoning and big refactors",
       "failover": [
-        "claude-sonnet-5",
         "kimi/k2.8",
-        "~deepseek/deepseek-v4-flash-latest"
+        "xiaomi/mimo-v2.6-pro"
       ]
     },
     {
@@ -392,7 +431,7 @@
       "blurb": "Frontend — React, CSS, layout",
       "_tier_note": "upstream_id/context are DISCOVERED, not assumed: `switchboard.py login` tries upstream_candidates best-first against the real key and writes whichever the plan actually serves. No official source states whether Kimi Code's 1M model is tier-gated, so do not trust a blog for it — re-run `login --check` after any plan change.",
       "failover": [
-        "moonshotai/kimi-k3"
+        "xiaomi/mimo-v2.6-pro"
       ]
     },
     {
@@ -446,7 +485,10 @@
         "frontend"
       ],
       "source": "served under id kimi-for-coding on this account; /v1/models reports 'K2.8 Preview', 1,048,576 ctx, dynamic tools - probed HTTP 200 2026-09-18",
-      "blurb": "Lighter Kimi generation, 1M ctx"
+      "blurb": "Lighter Kimi generation, 1M ctx",
+      "failover": [
+        "xiaomi/mimo-v2.6-pro"
+      ]
     },
     {
       "id": "kimi/k3-256k",
@@ -461,7 +503,10 @@
       "context": 262144,
       "good_at": "K3 at a 256K window, which Kimi documents as drawing LESS membership quota than full k3 for routine work. Prefer over kimi/k3 whenever the task fits 256K.",
       "upstream_id": "k3-256k",
-      "blurb": "K3 at 256K — less Kimi quota"
+      "blurb": "K3 at 256K — less Kimi quota",
+      "failover": [
+        "xiaomi/mimo-v2.6-pro"
+      ]
     },
     {
       "id": "xiaomi/mimo-v2.6-flash",
@@ -520,8 +565,8 @@
       "tier": "flash",
       "billing": "metered",
       "price": [
-        0.09,
-        0.34
+        0.2,
+        0.4
       ],
       "context": 262144,
       "good_at": "small, well-specified Python edits and quick answers at almost no cost. It's the Kaggle competition model, so every session is practice for that agent. Not for long or subtle work.",
@@ -649,6 +694,73 @@
       "context": 131072,
       "blurb": "Kaggle credit · small",
       "good_at": "hand-picked sessions on Kaggle's free daily credit; never auto-routed."
+    },
+    {
+      "id": "nvidia/nemotron-3-super-120b-a12b:free",
+      "name": "NVIDIA: Nemotron 3 Super (free)",
+      "family": "nemotron",
+      "tier": "pro",
+      "price": [
+        0.0,
+        0.0
+      ],
+      "context": 262144,
+      "good_at": "free bulk per-file review (vault backlog crawl); non-ZDR, never for State Street or the private vault",
+      "zdr": false
+    },
+    {
+      "id": "qwen/qwen3.8-27b:free",
+      "name": "Qwen: Qwen3.8 27B (free)",
+      "family": "qwen",
+      "tier": "pro",
+      "price": [
+        0.0,
+        0.0
+      ],
+      "context": 262144,
+      "good_at": "free per-file backlog crawl only; non-ZDR, never State Street or the private vault",
+      "zdr": false
+    },
+    {
+      "id": "google/gemma-4-31b-it:free",
+      "name": "Google: Gemma 4 31B (free)",
+      "family": "gemma",
+      "tier": "pro",
+      "price": [
+        0.0,
+        0.0
+      ],
+      "context": 262144,
+      "good_at": "free per-file backlog crawl only; non-ZDR, never State Street or the private vault",
+      "zdr": false
+    },
+    {
+      "id": "google/gemma-4-26b-a4b-it:free",
+      "name": "Google: Gemma 4 26B A4B  (free)",
+      "family": "gemma",
+      "tier": "pro",
+      "price": [
+        0.0,
+        0.0
+      ],
+      "context": 262144,
+      "good_at": "free per-file backlog crawl only; non-ZDR",
+      "zdr": false
+    },
+    {
+      "id": "anthropic/claude-haiku-5.5",
+      "name": "Anthropic: Claude Haiku 5.5",
+      "family": "claude",
+      "tier": "pro",
+      "price": [
+        0.1,
+        0.5
+      ],
+      "context": 1000000,
+      "billing": "metered",
+      "good_at": "quick well-formed answers and light tool use at Haiku speed, metered through the OpenRouter API at $0.1/$0.5 per 1M tokens. Same Claude Haiku 5.5 model as the plan's haiku, but billed per token instead of subscription quota - pick it when plan quota must be preserved. 1M context.",
+      "blurb": "Quick answers and light tool use · OpenRouter",
+      "_route_note": "OpenRouter id (dot, not dash: anthropic/claude-haiku-5.5). Routes to openrouter via upstream_for's slash rule - NOT to the anthropic upstream - so it is refused in data:'claude' folders (the private vault) and billed per token. zdr left at default true: OpenRouter does not expose ZDR in the model list, so if the strict workspace's providers page shows no orange shields for it, re-add with --no-zdr."
     }
   ],
   "_arrow_note": "The ←/→ row. Claude Code's effort slider reaches the wire as output_config.effort, and a row declared via ANTHROPIC_CUSTOM_MODEL_OPTION with SUPPORTED_CAPABILITIES=effort,xhigh_effort,max_effort gets that slider even as a gateway id. So one picker row carries this shortlist and the arrows choose between them. Ordered weakest to strongest; an unmapped level falls to the strongest set. Published as a picker row with behavesAs rather than via ANTHROPIC_CUSTOM_MODEL_OPTION: replaceBuiltInOptions hides that env var's row outright (stated in the 2.1.278 binary), so with a lineup in place the env route cannot work. The modelPicker schema is {model, label?, description?, behavesAs?}.",
@@ -687,14 +799,14 @@
     ],
     "gemma_or_per_hour": null
   },
-  "_dispatch_note": "switchboard run <role>: a headless prompt walks plan -> antigravity -> cash and stops at the first tier with headroom. plan is the role's plan id sent through this router tagged x-switchboard-run: plan:<id>, so the router's own failover may land on kimi but never on a metered model; the start model is gated by the meter for its own vendor (Claude ids by Claude's meter, kimi/ ids by Kimi's). antigravity invokes Google's own agy CLI in print mode on ONE Google account -- never its token, never cloudcode-pa, never account rotation (Google's reinstatement terms call circumventing usage limits a ban offence). It is neither Claude nor ZDR, so only folders with data policy 'any' may reach it. cash is the only metered step (~0.6 cents a call measured 2026-10-08). The ids below are the single place to swap models. Lead override 2026-10-08: the coder's plan model is kimi/k3-256k so writing code does not spend Claude quota.",
+  "_dispatch_note": "switchboard run <role>: a headless prompt walks plan -> antigravity -> cash and stops at the first tier with headroom. plan is the role's plan id sent through this router tagged x-switchboard-run: plan:<id>, so the router's own failover may land on kimi but never on a metered model; the start model is gated by the meter for its own vendor (Claude ids by Claude's meter, kimi/ ids by Kimi's). antigravity invokes Google's own agy CLI in print mode on ONE Google account -- never its token, never cloudcode-pa, never account rotation (Google's reinstatement terms call circumventing usage limits a ban offence). It is neither Claude nor ZDR, so only folders with data policy 'any' may reach it. cash is the only metered step (~0.6 cents a call measured 2026-10-08). The ids below are the single place to swap models. Lead override 2026-10-08 (later): the coder's plan model is claude-haiku-5-5, because the Kimi month hit 98.6% and Lionel asked for Haiku (2026-10-08); kimi stays the next tier and cash (MiMo) the last.",
   "dispatch": {
     "agy": "~/.local/bin/agy",
     "headroom": 95,
     "_antigravity_why": "gemini-3.8-flash-high over 3.1-pro-high (Lionel 2026-10-08; Artificial Analysis): Intelligence Index 41 vs 30, Terminal-Bench 4.0 20% vs 4%, AutomationBench 60% vs 35%. It spends ~71k output tokens per task vs 18k (~4x quota) and ~568 s vs 151 s, hence the long agy_timeout.",
     "roles": {
       "coder": {
-        "plan": "kimi/k3-256k",
+        "plan": "claude-haiku-5-5",
         "kimi": "kimi/k2.8",
         "antigravity": "gemini-3.8-flash-high",
         "agy_timeout": "45m",
@@ -715,5 +827,6 @@
         "cash": "xiaomi/mimo-v2.6-pro"
       }
     }
-  }
+  },
+  "_failover_policy": "Lionel, 2026-10-08: \"if we can use subscriton we do that / if not we ue mimo\". Every chain is subscription models first (Claude, then Kimi), and its only metered step is MiMo Pro. No Haiku-on-OpenRouter, DeepSeek, or OpenRouter K3 as a fallback. One Anthropic limit covers Opus, Fable, Sonnet and Haiku together (Lionel, 2026-10-08), so no Claude model fails over to another Claude model: it would only 429 again."
 }

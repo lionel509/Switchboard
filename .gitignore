@@ -20,6 +20,9 @@ live-upstreams.json*
 # Pinned start model — written by `route --primary`, read by the claude() wrapper
 start-model
 
+# The editor's own view settings (the fleet band toggle) -- written by tui.py only
+tui-prefs.json
+
 # --- cleanup pass (issue #36) — appended; nothing above was removed -------
 
 # Env variants; the bare `.env` rule is above. Nothing here reads an env file —
