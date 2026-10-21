@@ -861,3 +861,8 @@ def test_inherit_agent_gets_the_main_models_chain():
     assert "claude-opus-5-5" in block
     lines = tui.band_lines(c, {}, [("worker", "inherit")], "opus[1m]", 0, width=76)
     assert "(inherit)" not in "".join(t for line in lines for t, _ in line)
+
+
+def test_inherit_with_unrecognised_main_is_not_claimed_to_fail():
+    for main in ("default", "best", ""):
+        assert "fails instead" not in tui.fleet_block(fixture_cat(), [("reviewer", "inherit")], main)

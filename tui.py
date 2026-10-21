@@ -781,6 +781,8 @@ def fleet_block(cat, agents, main):
         eff = effective_model(model, main)
         chain = tier_chain(cat, eff) if eff else []
         text = " → ".join(h + (" (metered)" if hop_metered(cat, h) else "") for h in chain)
+        if not text and model == "inherit" and eff not in ALIASES:
+            text = "follows the session's main model (tier unknown)"
         rows.append("| %s | %s | main session | no | %s |"
                     % (name, model or "n/a", text or "none -- fails instead"))
     return "\n".join([MARK_START] + rows + [
