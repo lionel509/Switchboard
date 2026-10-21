@@ -13,7 +13,7 @@ Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
 and is stripped on both third-party paths — it never leaves this machine toward
 OpenRouter or a vendor endpoint.
 """
-import base64, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
+import base64, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, unicodedata, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -478,11 +478,13 @@ def ask_decision_model(task, cands, key, model):
             "state": task,
             "questions": {"model": {"type": "choice", "instructions": DECISION_INSTRUCTIONS,
                                     "criteria": criteria}}}
-    payload = openrouter_post(DECISION_PATH, body, key)
-    if payload is None:
-        return None
     rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": "openrouter",
            "model_requested": model, "kind": "auto_decision"}
+    payload = openrouter_post(DECISION_PATH, body, key)
+    if payload is None:
+        rec.update(status=504, error="no response (timeout or transport error)")
+        log_request(rec)
+        return None
     if "error" in payload:
         err = payload["error"] if isinstance(payload["error"], dict) else {}
         code = err.get("code")
@@ -1277,7 +1279,7 @@ def data_level(v):
         return "any"
     if not isinstance(v, str):
         return "claude"                  # falsy non-strings too: 0, False, [] fail closed
-    v = v.strip().lower()
+    v = "".join(c for c in unicodedata.normalize("NFKC", v) if unicodedata.category(c) != "Cf").strip().lower()
     if not v:
         return "any"
     if v.startswith("claude"):
@@ -1285,7 +1287,7 @@ def data_level(v):
     return "any" if v == "any" else "zdr"
 
 
-CWD_RE = re.compile(r"Primary working directory:\s*([^\r\n\"\\]+)")
+CWD_RE = re.compile(r'Primary working directory:\s*((?:[^\r\n"\\]|\\u[0-9a-fA-F]{4}|\\/)+)')
 
 
 def cwd_of(body):
@@ -1293,7 +1295,14 @@ def cwd_of(body):
     if not body:
         return ""
     m = CWD_RE.search(body.decode("utf-8", "replace"))
-    return m.group(1).strip().rstrip("/") if m else ""
+    if not m:
+        return ""
+    s = m.group(1)
+    try:
+        s = json.loads('"' + s + '"')   # undo \uXXXX and \/ from a JSON body
+    except ValueError:
+        pass
+    return s.strip().rstrip("/")
 
 
 def policy_for(cwd):
@@ -1306,12 +1315,12 @@ def policy_for(cwd):
     pol = dict(POLICY.get("_default") or POLICY_DEFAULT)
     # APFS is case-insensitive: `cd private` reaches Private, and the cwd
     # arrives as typed. A missed row drops the data filter, not just effort (#40).
-    cwd = (cwd or "").lower()
+    cwd = unicodedata.normalize("NFC", cwd or "").lower()
     best, hits = None, []
     for path, p in POLICY.items():
         if path.startswith("_") or not isinstance(p, dict):
             continue
-        root = os.path.expanduser(path).rstrip("/").lower()
+        root = unicodedata.normalize("NFC", os.path.expanduser(path)).rstrip("/").lower()
         if cwd == root or cwd.startswith(root + "/"):
             if best is None or len(root) > len(best):
                 best, hits = root, [(path, p)]
