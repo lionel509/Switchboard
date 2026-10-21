@@ -865,4 +865,19 @@ def test_inherit_agent_gets_the_main_models_chain():
 
 def test_inherit_with_unrecognised_main_is_not_claimed_to_fail():
     for main in ("default", "best", ""):
-        assert "fails instead" not in tui.fleet_block(fixture_cat(), [("reviewer", "inherit")], main)
+        block = tui.fleet_block(fixture_cat(), [("reviewer", "inherit")], main)
+        assert "fails instead" not in block
+        assert "follows the session's main model (tier unknown)" in block
+
+
+def test_model_less_agent_inherits_like_inherit():
+    cat = fixture_cat()
+    block = tui.fleet_block(cat, [("worker", "")], "opus[1m]")
+    row = [l for l in block.splitlines() if l.startswith("| worker")][0]
+    assert "fails instead" not in row
+    assert "claude-opus-5-5" in row
+    def band(model):
+        lines = tui.band_lines(cat, {}, [("worker", model)], "opus[1m]", 0, width=76)
+        return "".join(t for line in lines for t, _ in line)
+    assert "no chain" not in band("")
+    assert band("") == band("inherit")
