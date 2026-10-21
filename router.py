@@ -136,9 +136,10 @@ ROUTER_MODEL = os.environ.get("CLAUDE_ROUTER_AUTO_ROUTER",
 # escalates. Defaults to Anthropic: free at the margin on a subscription.
 FALLBACK     = os.environ.get("CLAUDE_ROUTER_AUTO_FALLBACK",
                               CATALOG.get("fallback", "claude-sonnet-5"))
-# Asked FIRST on Auto's first turn: an OpenRouter decision model (System One
-# API, POST /api/alpha/decisions) answers a typed choice over the candidate
-# ids. "" turns the step off and Auto goes straight to ROUTER_MODEL.
+# Asked FIRST on Auto's first turn: an ordered chain of OpenRouter decision
+# models (System One API, POST /api/alpha/decisions) answers a typed choice
+# over the candidate ids. Each is tried in turn; a string is a one-item chain.
+# "" or [] turns the step off and Auto goes straight to ROUTER_MODEL.
 DECISION_MODEL = os.environ.get("CLAUDE_ROUTER_AUTO_DECIDER",
                                 CATALOG.get("decision_model", ""))
 DECISION_PATH  = "/api/alpha/decisions"
@@ -452,18 +453,28 @@ DECISION_INSTRUCTIONS = (
     "(5) pick none only if no option could do the work.")
 
 
-def ask_decision_model(task, cands, key):
-    """Ask DECISION_MODEL for a typed choice over cands. An id from cands, or None.
+def decision_chain(v=None):
+    """The decision models to try, in order. A string is a one-item chain; "" or [] is off."""
+    if v is None:
+        v = DECISION_MODEL
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, (list, tuple)):
+        return []
+    return [m for m in v if isinstance(m, str) and m]
+
+
+def ask_decision_model(task, cands, key, model):
+    """Ask one decision model for a typed choice over cands. An id from cands, or None.
 
     The decision API answers with an exact option key, so the reply needs no
     fuzzy match. Every call is a requests.log row: it is cash, and
-    claude-router-stats totals it. Failures return None and the caller falls through.
+    claude-router-stats totals it. Errors, refusals and non-candidate answers
+    return None and the chain moves on.
     """
-    if not DECISION_MODEL:
-        return None
     criteria = {m["id"]: cand_line(m) for m in cands}
     criteria["none"] = "No listed model fits this task."
-    body = {"model": DECISION_MODEL, "provider": prefs_for(DECISION_MODEL),
+    body = {"model": model, "provider": prefs_for(model),
             "state": task,
             "questions": {"model": {"type": "choice", "instructions": DECISION_INSTRUCTIONS,
                                     "criteria": criteria}}}
@@ -471,7 +482,7 @@ def ask_decision_model(task, cands, key):
     if payload is None:
         return None
     rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": "openrouter",
-           "model_requested": DECISION_MODEL, "kind": "auto_decision"}
+           "model_requested": model, "kind": "auto_decision"}
     if "error" in payload:
         err = payload["error"] if isinstance(payload["error"], dict) else {}
         code = err.get("code")
@@ -498,7 +509,7 @@ def ask_decision_model(task, cands, key):
 def ask_router_model(task, cands=None):
     """Name the best model for this task. None on any failure.
 
-    Asks DECISION_MODEL first, then ROUTER_MODEL. Never returns an id outside cands.
+    Asks each DECISION_MODEL in turn, then ROUTER_MODEL. Never returns an id outside cands.
     """
     if cands is None:
         cands = CANDIDATES
@@ -507,9 +518,10 @@ def ask_router_model(task, cands=None):
     key = or_key()
     if not key:
         return None
-    got = ask_decision_model(task, cands, key)
-    if got:
-        return got
+    for model in decision_chain():
+        got = ask_decision_model(task, cands, key, model)
+        if got:
+            return got
     if not ROUTER_MODEL:
         return None
 
@@ -646,7 +658,8 @@ def resolve_family(req, fam, tier=None, pol=None):
     # was chosen deliberately, so erring toward capable beats erring toward cheap.
     if not may_send_task(pol):
         # claude folder: no router call, so the task never leaves the machine.
-        chosen = pinned or cands[-1]["id"]
+        # A pin set under an earlier looser folder must not be served here.
+        chosen = pinned if pinned and allowed(pinned, pol or {}) else cands[-1]["id"]
     else:
         chosen = pinned or ask_router_model(task_text(req), cands) or cands[-1]["id"]
     with _auto_lock:
@@ -1256,14 +1269,20 @@ def data_level(v):
     allowed() and policy_for() both read data through here, so they cannot
     disagree. Empty means any; any other string is matched lowercased, and one
     that is neither "claude" nor "any" means zdr (as allowed() always read it).
-    A non-string (a hand-edited list, a number) fails closed as claude.
+    A non-string (a hand-edited list, a number, even 0 or []) fails closed as
+    claude, and so does any string starting with "claude" after strip+lower.
+    None or an empty string means any (absent).
     """
-    if not v:
+    if v is None:
         return "any"
     if not isinstance(v, str):
-        return "claude"
-    v = v.lower()
-    return v if v in ("claude", "any") else "zdr"
+        return "claude"                  # falsy non-strings too: 0, False, [] fail closed
+    v = v.strip().lower()
+    if not v:
+        return "any"
+    if v.startswith("claude"):
+        return "claude"                  # "claude ", "claude-only" fail closed too
+    return "any" if v == "any" else "zdr"
 
 
 CWD_RE = re.compile(r"Primary working directory:\s*([^\r\n\"\\]+)")

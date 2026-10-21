@@ -260,6 +260,15 @@ decision was made — more than 3 tools offered, more than 6 messages deep, or a
 `fallback` also absorbs every failure: router model unreachable, a reply naming nothing in the
 catalog, no OpenRouter key. Auto degrades to a working model rather than to an error.
 
+Before the router model, Auto's first turn asks an **ordered chain of decision models** (OpenRouter's
+System One API, `POST /api/alpha/decisions`). Each returns a typed choice over the candidate ids,
+so the answer is an exact key rather than a fuzzy match. The chain is `decision_model` in
+`models.json`, tried in order: `typesafe/jev-1.13` ($0.042/M input), then `scaledown/classify-1`
+($0.04/M), then `inception/mercury-decide` ($0.02/M). Output is $0. The next model is tried when one
+errors, is refused, or names something that is not a candidate. If all three fail, Auto falls to
+`router_model`, then `fallback`. Each attempt is its own `requests.log` row (`kind: auto_decision`),
+so `claude-router-stats` totals the cash. A string is a one-item chain. `""` or `[]` turns the step off.
+
 > [!tip]
 > Cheap models worth using as the router are **reasoning** models, and a routing decision does
 > not need reasoning. Left on, the entire `max_tokens` budget goes to thinking tokens and the
@@ -630,7 +639,7 @@ Then `exec zsh`, launch `claude`, and **restart it once more** so the picker rea
 | `CLAUDE_ROUTER_LOG` | `~/.local/share/claude-router/requests.log` | request log path |
 | `CLAUDE_ROUTER_AUTO_ROUTER` | `models.json` `router_model` | cheap model that picks for Auto |
 | `CLAUDE_ROUTER_AUTO_FALLBACK` | `models.json` `fallback` | used on escalation or any failure |
-| `CLAUDE_ROUTER_AUTO_DECIDER` | `models.json` `decision_model` | OpenRouter decision model (System One API) asked first when Auto picks; empty = off |
+| `CLAUDE_ROUTER_AUTO_DECIDER` | `models.json` `decision_model` | OpenRouter decision model(s) (System One API) asked first when Auto picks; a string or an ordered list, empty = off |
 | `CLAUDE_ROUTER_AUTO_CHARS` | `24000` | prompt size that forces escalation |
 | `CLAUDE_ROUTER_MODELS` | `grok` | legacy substring filter, used only if `models.json` is missing |
 

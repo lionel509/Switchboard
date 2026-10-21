@@ -202,3 +202,66 @@ def test_claude_only_family_task_never_sent_to_openrouter(monkeypatch, tmp_path)
     assert net.calls == []
     assert not any(MARK in json.dumps(b) for _, b, _ in net.calls)
     assert r.allowed(got, pol)
+
+
+CHAIN = ["m/one", "m/two", "m/three"]
+
+
+def err_reply(code=503):
+    return {"error": {"code": code, "message": "upstream down"}}
+
+
+def test_chain_falls_to_second_model_on_error(monkeypatch, tmp_path):
+    net = setup_env(monkeypatch, tmp_path, decision=["m/one", "m/two"],
+                    net=Net(decisions=[err_reply(503), decision_reply("a/b")]))
+    assert r.ask_router_model("t", CANDS) == "a/b"
+    assert [b["model"] for _, b, _ in net.calls] == ["m/one", "m/two"]
+    assert net.paths() == ["/api/alpha/decisions", "/api/alpha/decisions"]
+    rows = [x for x in read_log(tmp_path) if x.get("kind") == "auto_decision"]
+    assert [(x["model_requested"], x["status"]) for x in rows] == [("m/one", 503), ("m/two", 200)]
+
+
+def test_chain_falls_to_third_on_non_candidate_answers(monkeypatch, tmp_path):
+    net = setup_env(monkeypatch, tmp_path, decision=CHAIN, net=Net(decisions=[
+        decision_reply("zz/not-listed"), decision_reply("none"), decision_reply("a/b")]))
+    assert r.ask_router_model("t", CANDS) == "a/b"
+    assert [b["model"] for _, b, _ in net.calls] == CHAIN
+    assert net.paths() == ["/api/alpha/decisions"] * 3
+    rows = [x for x in read_log(tmp_path) if x.get("kind") == "auto_decision"]
+    assert len(rows) == 3 and [x["status"] for x in rows] == [200, 200, 200]
+
+
+def test_all_three_failing_goes_to_router_model(monkeypatch, tmp_path):
+    net = setup_env(monkeypatch, tmp_path, decision=CHAIN, router="x/y", net=Net(
+        decisions=[err_reply(403), err_reply(429), {"answers": {}}],
+        chats=[chat_reply("~c/d-latest")]))
+    assert r.ask_router_model("t", CANDS) == "~c/d-latest"
+    assert [b["model"] for _, b, _ in net.calls[:3]] == CHAIN
+    assert net.paths() == ["/api/alpha/decisions"] * 3 + ["/api/v1/messages"]
+    rows = [x for x in read_log(tmp_path) if x.get("kind") == "auto_decision"]
+    assert len(rows) == 3
+
+
+def test_all_three_failing_with_no_router_model_returns_none(monkeypatch, tmp_path):
+    net = setup_env(monkeypatch, tmp_path, decision=CHAIN, router="", net=Net(
+        decisions=[err_reply(), err_reply(), None]))
+    assert r.ask_router_model("t", CANDS) is None
+    assert net.paths() == ["/api/alpha/decisions"] * 3
+
+
+def test_string_form_is_a_one_item_chain(monkeypatch, tmp_path):
+    assert r.decision_chain("typesafe/jev-1.13") == ["typesafe/jev-1.13"]
+    assert r.decision_chain(["a/1", "b/2"]) == ["a/1", "b/2"]
+    assert r.decision_chain("") == []
+    assert r.decision_chain([]) == []
+    net = setup_env(monkeypatch, tmp_path, decision="typesafe/jev-1.13",
+                    net=Net(decisions=[decision_reply("a/b")]))
+    assert r.ask_router_model("t", CANDS) == "a/b"
+    assert [b["model"] for _, b, _ in net.calls] == ["typesafe/jev-1.13"]
+
+
+def test_empty_list_is_off(monkeypatch, tmp_path):
+    net = setup_env(monkeypatch, tmp_path, decision=[], router="x/y",
+                    net=Net(chats=[chat_reply("a/b")]))
+    assert r.ask_router_model("t", CANDS) == "a/b"
+    assert net.paths() == ["/api/v1/messages"]
