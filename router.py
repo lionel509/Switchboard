@@ -136,6 +136,12 @@ ROUTER_MODEL = os.environ.get("CLAUDE_ROUTER_AUTO_ROUTER",
 # escalates. Defaults to Anthropic: free at the margin on a subscription.
 FALLBACK     = os.environ.get("CLAUDE_ROUTER_AUTO_FALLBACK",
                               CATALOG.get("fallback", "claude-sonnet-5"))
+# Asked FIRST on Auto's first turn: an OpenRouter decision model (System One
+# API, POST /api/alpha/decisions) answers a typed choice over the candidate
+# ids. "" turns the step off and Auto goes straight to ROUTER_MODEL.
+DECISION_MODEL = os.environ.get("CLAUDE_ROUTER_AUTO_DECIDER",
+                                CATALOG.get("decision_model", ""))
+DECISION_PATH  = "/api/alpha/decisions"
 # Escalate above this many characters of serialised prompt (~4 chars/token).
 AUTO_ESCALATE_CHARS = int(os.environ.get("CLAUDE_ROUTER_AUTO_CHARS", "24000"))
 # Only this much of the task is shown to the router model — it needs the gist,
@@ -378,15 +384,8 @@ Task:
 Model id:"""
 
 
-def ask_router_model(task, cands=None):
-    """One cheap call to name the best model for this task. None on any failure."""
-    if cands is None:
-        cands = CANDIDATES
-    if not ROUTER_MODEL or not cands or not task:
-        return None
-    key = or_key()
-    if not key:
-        return None
+def cand_line(m):
+    """One candidate as the router prompts show it: id | cost | what it is good at."""
     def cost(m):
         if m.get("billing") == "subscription":
             return "[subscription]"
@@ -395,54 +394,34 @@ def ask_router_model(task, cands=None):
             return "[priced by whatever it selects]"
         return "$%s/$%s per 1M" % (p[0], p[1])
 
-    def line(m):
-        s = "%s | %s | %s" % (m["id"], cost(m), m.get("good_at", ""))
-        if m.get("specialties"):
-            s += " SPECIALTY: %s." % ", ".join(m["specialties"])
-        return s
+    s = "%s | %s | %s" % (m["id"], cost(m), m.get("good_at", ""))
+    if m.get("specialties"):
+        s += " SPECIALTY: %s." % ", ".join(m["specialties"])
+    return s
 
-    # Group and order the list rather than relying on a rule to convey price.
-    # Told only in prose, "pick the cheapest" loses to a mid-priced model whose
-    # description sounds apt; shown as an ordering, it holds.
-    subs = [m for m in cands if m.get("billing") == "subscription"]
-    paid = sorted([m for m in cands if m.get("billing") != "subscription"],
-                  key=lambda m: (m.get("price") or [0])[0] if
-                  (m.get("price") or [0])[0] >= 0 else 1e9)
-    parts = []
-    if subs:
-        parts.append("NO CASH COST (consume plan quota):\n"
-                     + "\n".join(line(m) for m in subs))
-    if paid:
-        parts.append("COST CASH (listed cheapest first):\n"
-                     + "\n".join(line(m) for m in paid))
-    listing = "\n\n".join(parts) if parts else "\n".join(line(m) for m in cands)
-    body = json.dumps({
-        # The cheap models worth using here are reasoning models, and a routing
-        # decision does not need reasoning. Left on, the whole max_tokens budget
-        # goes to thinking tokens and the reply comes back stop_reason=max_tokens
-        # with no text at all. OpenRouter's own {"reasoning": {"enabled": false}}
-        # is NOT honoured on this endpoint; the Anthropic-style field is.
-        "model": ROUTER_MODEL, "max_tokens": 200, "temperature": 0,
-        "thinking": {"type": "disabled"},
-        "provider": prefs_for(ROUTER_MODEL),
-        "messages": [{"role": "user", "content": ROUTER_PROMPT % (listing, task)}],
-    }).encode()
+
+def openrouter_post(path, body, key, headers=None):
+    """POST JSON to openrouter.ai. The parsed dict, or None on any failure."""
     try:
         conn = http.client.HTTPSConnection("openrouter.ai", timeout=20)
-        conn.request("POST", "/api/v1/messages", body=body, headers={
+        conn.request("POST", path, body=json.dumps(body).encode(), headers={
             "Authorization": "Bearer " + key, "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01"})
+            **(headers or {})})
         payload = json.loads(conn.getresponse().read())
         conn.close()
     except Exception:
         return None
-    blocks = [b for b in payload.get("content", []) if isinstance(b, dict)]
-    text = " ".join(b.get("text") or b.get("thinking") or "" for b in blocks)
-    # Match, don't parse. The reply drifts in three ways depending on which
-    # provider throughput-sorting landed on: it drops the leading "~" of an alias
-    # roughly half the time, sometimes gives only the slug, and sometimes the
-    # display name. Longest id first so a short id cannot shadow a longer one.
-    # Thinking text is included for when the budget ran out before any text.
+    return payload if isinstance(payload, dict) else None
+
+
+def match_model(text, cands):
+    """The candidate a free-text reply names, or None.
+
+    Match, don't parse. The reply drifts in three ways depending on which
+    provider throughput-sorting landed on: it drops the leading "~" of an alias
+    roughly half the time, sometimes gives only the slug, and sometimes the
+    display name. Longest id first so a short id cannot shadow a longer one.
+    """
     flat = text.replace("~", "").lower()
     cands = sorted(cands, key=lambda x: -len(x["id"]))
     for m in cands:                                  # full id
@@ -457,6 +436,117 @@ def ask_router_model(task, cands=None):
         if len(name) > 4 and name in flat:
             return m["id"]
     return None
+
+
+DECISION_INSTRUCTIONS = (
+    "Pick the one model that should handle this task. Each option is a model "
+    "id with its cost and what it is good at. [subscription] options cost no "
+    "money but use a limited monthly quota and are the most reliable at "
+    "multi-step tool use. Priced options cost cash per token. Rules in order: "
+    "(1) a task squarely inside an option's SPECIALTY goes to that option even "
+    "over a [subscription] one; (2) real coding, multi-step tool use, debugging, "
+    "or anything where a wrong answer costs time goes to a [subscription] option; "
+    "(3) bulk mechanical work (renames, greps, reformatting) goes to the CHEAPEST "
+    "priced option that covers it, never an expensive one; (4) if a priced option "
+    "is right but none clearly fits, pick openrouter/auto when it is listed; "
+    "(5) pick none only if no option could do the work.")
+
+
+def ask_decision_model(task, cands, key):
+    """Ask DECISION_MODEL for a typed choice over cands. An id from cands, or None.
+
+    The decision API answers with an exact option key, so the reply needs no
+    fuzzy match. Every call is a requests.log row: it is cash, and
+    claude-router-stats totals it. Failures return None and the caller falls through.
+    """
+    if not DECISION_MODEL:
+        return None
+    criteria = {m["id"]: cand_line(m) for m in cands}
+    criteria["none"] = "No listed model fits this task."
+    body = {"model": DECISION_MODEL, "provider": prefs_for(DECISION_MODEL),
+            "state": task,
+            "questions": {"model": {"type": "choice", "instructions": DECISION_INSTRUCTIONS,
+                                    "criteria": criteria}}}
+    payload = openrouter_post(DECISION_PATH, body, key)
+    if payload is None:
+        return None
+    rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": "openrouter",
+           "model_requested": DECISION_MODEL, "kind": "auto_decision"}
+    if "error" in payload:
+        err = payload["error"] if isinstance(payload["error"], dict) else {}
+        code = err.get("code")
+        rec.update(status=code if isinstance(code, int) else 502,
+                   error=str(err.get("message", ""))[:120])
+        log_request(rec)
+        return None
+    answers = payload.get("answers")
+    ans = answers.get("model") if isinstance(answers, dict) else None
+    ans = ans if isinstance(ans, dict) else {}
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    rec.update(status=200, model_used=payload.get("model"), choice=ans.get("choice"),
+               confidence=ans.get("confidence"), cost=usage.get("cost"),
+               **{"in": usage.get("input_tokens"), "out": usage.get("output_tokens")})
+    log_request(rec)
+    choice = ans.get("choice")
+    if not isinstance(choice, str) or not choice or choice == "none":
+        return None
+    if choice in criteria:
+        return choice
+    return match_model(choice, cands)
+
+
+def ask_router_model(task, cands=None):
+    """Name the best model for this task. None on any failure.
+
+    Asks DECISION_MODEL first, then ROUTER_MODEL. Never returns an id outside cands.
+    """
+    if cands is None:
+        cands = CANDIDATES
+    if not cands or not task:
+        return None
+    key = or_key()
+    if not key:
+        return None
+    got = ask_decision_model(task, cands, key)
+    if got:
+        return got
+    if not ROUTER_MODEL:
+        return None
+
+    # Group and order the list rather than relying on a rule to convey price.
+    # Told only in prose, "pick the cheapest" loses to a mid-priced model whose
+    # description sounds apt; shown as an ordering, it holds.
+    subs = [m for m in cands if m.get("billing") == "subscription"]
+    paid = sorted([m for m in cands if m.get("billing") != "subscription"],
+                  key=lambda m: (m.get("price") or [0])[0] if
+                  (m.get("price") or [0])[0] >= 0 else 1e9)
+    parts = []
+    if subs:
+        parts.append("NO CASH COST (consume plan quota):\n"
+                     + "\n".join(cand_line(m) for m in subs))
+    if paid:
+        parts.append("COST CASH (listed cheapest first):\n"
+                     + "\n".join(cand_line(m) for m in paid))
+    listing = "\n\n".join(parts) if parts else "\n".join(cand_line(m) for m in cands)
+    body = {
+        # The cheap models worth using here are reasoning models, and a routing
+        # decision does not need reasoning. Left on, the whole max_tokens budget
+        # goes to thinking tokens and the reply comes back stop_reason=max_tokens
+        # with no text at all. OpenRouter's own {"reasoning": {"enabled": false}}
+        # is NOT honoured on this endpoint; the Anthropic-style field is.
+        "model": ROUTER_MODEL, "max_tokens": 200, "temperature": 0,
+        "thinking": {"type": "disabled"},
+        "provider": prefs_for(ROUTER_MODEL),
+        "messages": [{"role": "user", "content": ROUTER_PROMPT % (listing, task)}],
+    }
+    payload = openrouter_post("/api/v1/messages", body, key,
+                              {"anthropic-version": "2023-06-01"})
+    if payload is None:
+        return None
+    blocks = [b for b in payload.get("content", []) if isinstance(b, dict)]
+    # Thinking text is included for when the budget ran out before any text.
+    text = " ".join(b.get("text") or b.get("thinking") or "" for b in blocks)
+    return match_model(text, cands)
 
 
 def resolve_auto(req, pol=None):

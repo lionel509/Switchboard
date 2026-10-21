@@ -630,6 +630,7 @@ Then `exec zsh`, launch `claude`, and **restart it once more** so the picker rea
 | `CLAUDE_ROUTER_LOG` | `~/.local/share/claude-router/requests.log` | request log path |
 | `CLAUDE_ROUTER_AUTO_ROUTER` | `models.json` `router_model` | cheap model that picks for Auto |
 | `CLAUDE_ROUTER_AUTO_FALLBACK` | `models.json` `fallback` | used on escalation or any failure |
+| `CLAUDE_ROUTER_AUTO_DECIDER` | `models.json` `decision_model` | OpenRouter decision model (System One API) asked first when Auto picks; empty = off |
 | `CLAUDE_ROUTER_AUTO_CHARS` | `24000` | prompt size that forces escalation |
 | `CLAUDE_ROUTER_MODELS` | `grok` | legacy substring filter, used only if `models.json` is missing |
 

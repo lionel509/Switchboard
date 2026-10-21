@@ -83,6 +83,7 @@ def guess(mid):
 def cmd_list(args):
     cat = load()
     print("router model : %s" % cat.get("router_model", "(none)"))
+    print("decision model: %s" % cat.get("decision_model", "(none)"))
     print("fallback     : %s" % cat.get("fallback", "(none)"))
     for name, p in sorted(cat.get("providers", {}).items()):
         kf = p.get("key_file", "")
@@ -225,7 +226,7 @@ def cmd_remove(args):
     if len(cat["models"]) == before:
         print("not in the catalog: %s" % args.id, file=sys.stderr)
         return 1
-    for field in ("router_model", "fallback"):
+    for field in ("router_model", "decision_model", "fallback"):
         if cat.get(field) == args.id:
             print("⚠ %s was the %s; set a new one in models.json"
                   % (args.id, field), file=sys.stderr)
