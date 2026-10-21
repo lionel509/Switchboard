@@ -211,6 +211,56 @@ def test_403_failover_invariant(monkeypatch):
                         assert body in h.wfile.getvalue(), cell
 
 
+def test_gemma_error_text_non_string_message():
+    assert r.gemma_error_text(b'{"error":{"message":42}}') == "42"
+    assert "a" in r.gemma_error_text(b'{"error":{"message":{"a":1}}}')
+
+
+def test_kimi_403_non_string_message_does_not_crash(monkeypatch):
+    for body in (b'{"error":{"message":42}}', b'{"error":{"message":["x"]}}',
+                 b'{"error":{"message":{"a":1}}}'):
+        recs = []
+        h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, body), 200))
+        assert h.relay("POST", [dict(p) for p in KIMI_FIRST], run="") is None
+        assert recs[0]["status"] == 403
+        assert "failed_over_to" not in recs[0]
+        assert isinstance(recs[0]["error"], str)
+        assert body in h.wfile.getvalue()
+
+
+def test_kimi_403_mentioning_usage_limit_is_not_quota(monkeypatch):
+    body = b"error, status code: 403, message: Invalid API key. See the usage limit FAQ."
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, body), 200))
+    assert h.relay("POST", [dict(p) for p in KIMI_FIRST], run="") is None
+    assert "failed_over_to" not in recs[0]
+    assert len(recs) == 1
+
+
+def test_403_never_drains_on_credential_fuzz(monkeypatch):
+    import random
+    rng = random.Random(68)
+    frags = [b"You've reached your", b" monthly", b" usage limit", b"Invalid API key.",
+             b" See the", b".", b"\n", b'{"error":{"message":', b"42", b'"x"', b"}}",
+             b"\xff\xfe", b"limit", b"usage"]
+    models = {"anthropic": "claude-sonnet-5", "kimi": "kimi/k2.8"}
+    for _ in range(300):
+        body = b"".join(rng.choice(frags) for _ in range(rng.randint(1, 6)))
+        upstream = rng.choice(("kimi", "anthropic"))
+        status = rng.choice((401, 403))
+        content_length = rng.choice((True, False))
+        first = dict(upstream=upstream, model=models[upstream], host="h", headers={},
+                     path="/v1/messages", body=b"")
+        recs = []
+        h = relay_stub(monkeypatch, recs, statuses=(
+            FakeResp(status, body, content_length), 200))
+        h.relay("POST", [first, dict(PREPARED[0])], run="")   # must never raise
+        if "failed_over_to" in recs[0]:
+            low = body.lower()
+            assert (upstream == "kimi" and status == 403 and content_length
+                    and b"reached your" in low and b"usage limit" in low), body
+
+
 # 3. meters ------------------------------------------------------------------
 def test_meters_reads_fresh_files_and_ignores_stale(tmp_path):
     now = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
