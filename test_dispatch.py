@@ -151,6 +151,17 @@ def test_kimi_k3_quota_403_does_not_spill_onto_metered_hop(monkeypatch):
     assert h.wfile.getvalue() == QUOTA_403
 
 
+def test_kimi_quota_403_marks_kimi_skipped(monkeypatch):
+    # Merge-order pin from the #70 review: a quota 403 that moves on to a
+    # plan-billed hop must be remembered like a 429, or the next run walks
+    # back into the exhausted Kimi route.
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, QUOTA_403), 200))
+    assert h.relay("POST", [dict(p) for p in KIMI_FIRST], run="") is None
+    assert recs[0]["failed_over_to"] == "claude-sonnet-5"
+    assert r.SKIP_UNTIL.get("kimi/k2.8", 0) > 0
+
+
 def test_kimi_403_without_usage_limit_stays(monkeypatch):
     recs = []
     h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, ACCESS_403), 200))
