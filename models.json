@@ -565,8 +565,8 @@
       "tier": "flash",
       "billing": "metered",
       "price": [
-        0.09,
-        0.34
+        0.2,
+        0.4
       ],
       "context": 262144,
       "good_at": "small, well-specified Python edits and quick answers at almost no cost. It's the Kaggle competition model, so every session is practice for that agent. Not for long or subtle work.",
