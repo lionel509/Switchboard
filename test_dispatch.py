@@ -1,5 +1,5 @@
 """Headless dispatch tiers (#46). Run: python3 -m pytest test_dispatch.py"""
-import importlib.util, io, json, os, subprocess, sys, time, types
+import http.client, importlib.util, io, json, os, re, subprocess, sys, time, types
 
 spec = importlib.util.spec_from_file_location(
     "_r", os.path.join(os.path.dirname(os.path.abspath(__file__)), "router.py"))
@@ -35,17 +35,26 @@ def test_attempts_for_plan_only_drops_metered(monkeypatch):
 
 # 2. plan-tagged runs get a 402 when every plan-billed attempt was refused ---
 class FakeResp:
-    def __init__(self, status):
-        self.status = status
+    def __init__(self, status, body=b"{}", content_length=True):
+        self.status, self.body, self.content_length = status, body, content_length
+        self._sent = False
 
     def getheader(self, name):
-        return "2" if name == "content-length" else None
+        if name == "content-length":
+            return str(len(self.body)) if self.content_length else None
+        return None
 
     def getheaders(self):
-        return [("content-length", "2")]
+        return [("content-length", str(len(self.body)))] if self.content_length else []
 
     def read(self, *a):
-        return b"{}"
+        return self.body
+
+    def read1(self, n):
+        if self._sent:
+            return b""
+        self._sent = True
+        return self.body
 
 
 class FakeConn:
@@ -59,7 +68,12 @@ def relay_stub(monkeypatch, recs, statuses=(429, 429)):
     monkeypatch.setattr(r, "take_turn", lambda model: True)
     monkeypatch.setattr(r, "maybe_fetch_quota", lambda upstream: None)
     it = iter(statuses)
-    h.issue = lambda method, att, rec: (FakeConn(), FakeResp(next(it)))
+
+    def issue(method, att, rec):
+        item = next(it)              # an int, or a ready FakeResp (#68 bodies)
+        return FakeConn(), (item if isinstance(item, FakeResp) else FakeResp(item))
+
+    h.issue = issue
     h.fail = lambda code, msg: ("fail", code, msg)
     h.send_response = h.send_header = h.end_headers = lambda *a: None
     h.wfile = io.BytesIO()
@@ -102,6 +116,153 @@ def test_relay_plan_only_answers_402_and_tags_run(monkeypatch):
     h4 = relay_stub(monkeypatch, recs4, statuses=(404, 404))
     assert h4.relay("POST", [dict(p) for p in PREPARED], run="plan:t3") is None
     assert recs4[-1]["status"] == 404
+
+
+# 2b. a Kimi 403 that says "usage limit" is a quota, not a credential (#68) ----
+QUOTA_403 = (b"error, status code: 403, message: You've reached your monthly usage "
+             b"limit for this billing cycle. Your quota will be refreshed in the next cycle.")
+ACCESS_403 = b"error, status code: 403, message: You do not have access to model kimi-for-coding"
+KIMI_FIRST = [PREPARED[1], PREPARED[0]]
+
+
+def test_kimi_quota_403_fails_over(monkeypatch):
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, QUOTA_403), 200))
+    assert h.relay("POST", [dict(p) for p in KIMI_FIRST], run="") is None
+    assert recs[0]["status"] == 403
+    assert recs[0]["failed_over_to"] == "claude-sonnet-5"
+    assert "usage limit" in recs[0]["error"]
+    assert recs[-1]["status"] == 200
+
+
+def test_kimi_k3_quota_403_does_not_spill_onto_metered_hop(monkeypatch):
+    # Real catalog: kimi/k3 chains to xiaomi/mimo-v2.6-pro (cash fallback, metered).
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, QUOTA_403), 200))
+    models = r.attempts_for("kimi/k3", r.POLICY_DEFAULT, False)
+    atts = [dict(upstream=r.upstream_for(m).split(":")[-1], model=m, host="h", headers={},
+                 path="/v1/messages", body=b"") for m in models]
+    assert r.metered(models[1])
+    h.relay("POST", atts, run="")
+    assert "failed_over_to" not in recs[0]
+    assert recs[0]["status"] == 403
+    assert h.wfile.getvalue() == QUOTA_403
+
+
+def test_kimi_403_without_usage_limit_stays(monkeypatch):
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, ACCESS_403), 200))
+    assert h.relay("POST", [dict(p) for p in KIMI_FIRST], run="") is None
+    assert "failed_over_to" not in recs[0]
+    assert recs[0]["status"] == 403
+    assert "access" in recs[0]["error"]
+    assert h.wfile.getvalue() == ACCESS_403          # bytes reach the client
+    assert len(recs) == 1
+
+
+def test_non_kimi_403_with_quota_text_stays(monkeypatch):
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, QUOTA_403), 200))
+    assert h.relay("POST", [dict(p) for p in PREPARED], run="") is None
+    assert "failed_over_to" not in recs[0]
+    assert len(recs) == 1
+    assert h.wfile.getvalue() == QUOTA_403
+
+
+def test_kimi_quota_403_on_plan_run_is_exhausted(monkeypatch):
+    # anthropic answers 429, then the Kimi hop is a quota 403 and is the last
+    # attempt: it must become the plan-exhausted 402, not a raw 403.
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(429, FakeResp(403, QUOTA_403)))
+    out = h.relay("POST", [dict(p) for p in PREPARED], run="plan:t4")
+    assert out[:2] == ("fail", 402)
+    assert recs[-1]["error"] == "plan exhausted"
+
+
+def test_403_failover_invariant(monkeypatch):
+    bodies = [
+        b"error, status code: 403, message: You've reached your 5-hour usage limit.",
+        b"error, status code: 403, message: You've reached your weekly (7-day) usage limit.",
+        QUOTA_403,
+        b'{"error":{"message":"You\'ve reached your 5-hour usage limit."}}',
+        b"You've reached your concurrent request limit. Please wait...",
+        b"invalid api key",
+        b"",
+        b"x" * 9000,
+        b"error, status code: 403, message: Invalid API key. See the usage limit FAQ.",
+        b'{"error":{"message":42}}',
+        b'{"error":{"message":{"text":"You\'ve reached your 5-hour usage limit."}}}',
+    ]
+    models = {"anthropic": "claude-sonnet-5", "kimi": "kimi/k2.8",
+              "openrouter": "xiaomi/mimo-v2.6-pro"}
+    for upstream in ("kimi", "anthropic", "openrouter"):
+        for status in (401, 403):
+            for body in bodies:
+                for content_length in (True, False):
+                    first = dict(upstream=upstream, model=models[upstream], host="h",
+                                 headers={}, path="/v1/messages", body=b"")
+                    recs = []
+                    h = relay_stub(monkeypatch, recs, statuses=(
+                        FakeResp(status, body, content_length), 200))
+                    h.relay("POST", [first, dict(PREPARED[0])], run="")
+                    failover = (upstream == "kimi" and status == 403 and content_length
+                                and len(body) <= 8192
+                                and re.search(rb"(?i)reached your [^.\n]{0,40}usage limit", body) is not None)
+                    cell = (upstream, status, body[:24], content_length)
+                    assert ("failed_over_to" in recs[0]) == failover, cell
+                    if not failover:
+                        assert len(recs) == 1, cell
+                        assert body in h.wfile.getvalue(), cell
+
+
+def test_gemma_error_text_non_string_message():
+    assert r.gemma_error_text(b'{"error":{"message":42}}') == "42"
+    assert "a" in r.gemma_error_text(b'{"error":{"message":{"a":1}}}')
+
+
+def test_kimi_403_non_string_message_does_not_crash(monkeypatch):
+    for body in (b'{"error":{"message":42}}', b'{"error":{"message":["x"]}}',
+                 b'{"error":{"message":{"a":1}}}'):
+        recs = []
+        h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, body), 200))
+        assert h.relay("POST", [dict(p) for p in KIMI_FIRST], run="") is None
+        assert recs[0]["status"] == 403
+        assert "failed_over_to" not in recs[0]
+        assert isinstance(recs[0]["error"], str)
+        assert body in h.wfile.getvalue()
+
+
+def test_kimi_403_mentioning_usage_limit_is_not_quota(monkeypatch):
+    body = b"error, status code: 403, message: Invalid API key. See the usage limit FAQ."
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, body), 200))
+    assert h.relay("POST", [dict(p) for p in KIMI_FIRST], run="") is None
+    assert "failed_over_to" not in recs[0]
+    assert len(recs) == 1
+
+
+def test_403_never_drains_on_credential_fuzz(monkeypatch):
+    import random
+    rng = random.Random(68)
+    frags = [b"You've reached your", b" monthly", b" usage limit", b"Invalid API key.",
+             b" See the", b".", b"\n", b'{"error":{"message":', b"42", b'"x"', b"}}",
+             b"\xff\xfe", b"limit", b"usage"]
+    models = {"anthropic": "claude-sonnet-5", "kimi": "kimi/k2.8"}
+    for _ in range(300):
+        body = b"".join(rng.choice(frags) for _ in range(rng.randint(1, 6)))
+        upstream = rng.choice(("kimi", "anthropic"))
+        status = rng.choice((401, 403))
+        content_length = rng.choice((True, False))
+        first = dict(upstream=upstream, model=models[upstream], host="h", headers={},
+                     path="/v1/messages", body=b"")
+        recs = []
+        h = relay_stub(monkeypatch, recs, statuses=(
+            FakeResp(status, body, content_length), 200))
+        h.relay("POST", [first, dict(PREPARED[0])], run="")   # must never raise
+        if "failed_over_to" in recs[0]:
+            low = body.lower()
+            assert (upstream == "kimi" and status == 403 and content_length
+                    and b"reached your" in low and b"usage limit" in low), body
 
 
 # 3. meters ------------------------------------------------------------------
@@ -511,3 +672,29 @@ def test_run_missing_dir_is_a_message(monkeypatch, tmp_path, capsys):
     h.args.dir = str(tmp_path / "nope")
     assert d.run(h.args) == 1
     assert "no such folder" in capsys.readouterr().err
+
+
+class TruncatedQuotaResp(FakeResp):
+    def read(self, *a):
+        raise http.client.IncompleteRead(QUOTA_403[:20], len(QUOTA_403) - 20)
+
+
+def test_truncated_quota_403_body_is_502_not_failover(monkeypatch):
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(TruncatedQuotaResp(403, QUOTA_403),))
+    out = h.relay("POST", [dict(PREPARED[1])], run="")
+    assert out[:2] == ("fail", 502)
+    assert "failed_over_to" not in recs[0]
+
+
+class TruncatedAccessResp(FakeResp):
+    def read(self, *a):
+        raise http.client.IncompleteRead(ACCESS_403[:20], len(ACCESS_403) - 20)
+
+
+def test_truncated_access_403_must_not_drain_plan(monkeypatch):
+    recs = []
+    h = relay_stub(monkeypatch, recs, statuses=(TruncatedAccessResp(403, ACCESS_403), 200))
+    out = h.relay("POST", [dict(p) for p in KIMI_FIRST], run="")
+    assert out[:2] == ("fail", 502)
+    assert "failed_over_to" not in recs[0]

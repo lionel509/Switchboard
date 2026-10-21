@@ -84,7 +84,7 @@ def gemma_error_text(data):
         msg = e.get("message") or json.dumps(d)
     except (ValueError, AttributeError):
         msg = data.decode(errors="replace") if isinstance(data, bytes) else str(data)
-    return msg[:300]
+    return str(msg)[:300]
 
 
 def gemma_or_body(req):
@@ -1041,7 +1041,35 @@ def sanitize_native(body, prov, wire_model):
 # Statuses that mean "this route is out of capacity", not "this request is wrong".
 # 429 rate limit / quota, 402 payment required, 529 overloaded. A 401/403 is a
 # credential problem and must NOT silently drain a different quota instead.
+# Kimi Code answers an exhausted plan with a 403 whose text says "usage limit"
+# (its error reference: "You've reached your <period> usage limit"); sniff_403
+# below maps only that sentence.
 FAILOVER_STATUSES = frozenset((402, 429, 529))
+KIMI_QUOTA_403 = re.compile(r"reached your [^.\n]{0,40}usage limit", re.I)
+SNIFF_LIMIT = 8192
+
+
+def sniff_403(att, resp):
+    """(body, quota, broken) for a Kimi 403; (None, False, False) otherwise.
+
+    Kimi Code says "out of quota" with a 403 and a plain-text "usage limit"
+    line, not a 429. Only that upstream, only that wording; a 401/403 from
+    anywhere else is still a credential problem. Reads the body only when it
+    is small and not streamed, so relay() can forward the same bytes. (#68)
+    """
+    if resp.status != 403 or att.get("upstream") != "kimi":
+        return None, False, False
+    n = resp.getheader("content-length")
+    if n is None or not str(n).isdigit() or int(n) > SNIFF_LIMIT:
+        return None, False, False
+    try:
+        body = resp.read()
+    except Exception:
+        # Truncated mid-body: the text is unknown, so it is never quota (a
+        # credential 403 must not drain another plan). relay() answers 502. (#68)
+        return None, False, True
+    text = body.decode("utf-8", "replace") if isinstance(body, bytes) else str(body)
+    return body, bool(KIMI_QUOTA_403.search(text)), False
 
 
 def metered(model):
@@ -1512,7 +1540,23 @@ class Router(BaseHTTPRequestHandler):
                 if last or metered(prepared[i + 1]["model"]):
                     return self.fail(502, "upstream %s: %s" % (att["host"], e))
                 continue
-            if resp.status in FAILOVER_STATUSES and not last:
+            body, quota, broken = sniff_403(att, resp)
+            if broken:
+                rec.update(status=502, error="403 body unreadable",
+                           ms=int((time.time() - t0) * 1000))
+                log_request(rec)
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                return self.fail(502, "upstream %s: 403 body truncated" % att["host"])
+            if body is not None:
+                rec["error"] = gemma_error_text(body)     # what the 403 said (#68)
+            # A quota 403 counts as a 429 only where the walk can go on to a
+            # plan-billed hop; onto a metered one it stays a 403 (no silent cash, #68).
+            quota_moves = quota and (last or not metered(prepared[i + 1]["model"]))
+            status = 429 if quota_moves else resp.status
+            if status in FAILOVER_STATUSES and not last:
                 rec.update(status=resp.status, failed_over_to=prepared[i + 1]["model"],
                            ms=int((time.time() - t0) * 1000))
                 log_request(rec)
@@ -1526,7 +1570,7 @@ class Router(BaseHTTPRequestHandler):
             break
         if resp is None:                      # every attempt raised
             return self.fail(502, "no upstream answered")
-        if run.startswith("plan:") and resp.status in FAILOVER_STATUSES:
+        if run.startswith("plan:") and status in FAILOVER_STATUSES:
             # Every plan-billed attempt was refused. Say so with a status Claude Code
             # does not retry, so `switchboard run` moves on at once instead of after
             # minutes of 429 backoff -- and never onto cash from here.
@@ -1571,7 +1615,7 @@ class Router(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 self.wfile.write(b"0\r\n\r\n")
             else:
-                data = resp.read()
+                data = body if body is not None else resp.read()
                 captured.extend(data)
                 self.wfile.write(data)
             self.wfile.flush()
