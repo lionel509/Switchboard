@@ -1,5 +1,5 @@
 """Headless dispatch tiers (#46). Run: python3 -m pytest test_dispatch.py"""
-import http.client, importlib.util, io, json, os, subprocess, sys, time, types
+import http.client, importlib.util, io, json, os, re, subprocess, sys, time, types
 
 spec = importlib.util.spec_from_file_location(
     "_r", os.path.join(os.path.dirname(os.path.abspath(__file__)), "router.py"))
@@ -136,7 +136,7 @@ def test_kimi_quota_403_fails_over(monkeypatch):
 
 
 def test_kimi_k3_quota_403_does_not_spill_onto_metered_hop(monkeypatch):
-    # Real catalog: kimi/k3 chains to moonshotai/kimi-k3 ($3/$15 per 1M, metered).
+    # Real catalog: kimi/k3 chains to xiaomi/mimo-v2.6-pro (cash fallback, metered).
     recs = []
     h = relay_stub(monkeypatch, recs, statuses=(FakeResp(403, QUOTA_403), 200))
     models = r.attempts_for("kimi/k3", r.POLICY_DEFAULT, False)
@@ -189,6 +189,9 @@ def test_403_failover_invariant(monkeypatch):
         b"invalid api key",
         b"",
         b"x" * 9000,
+        b"error, status code: 403, message: Invalid API key. See the usage limit FAQ.",
+        b'{"error":{"message":42}}',
+        b'{"error":{"message":{"text":"You\'ve reached your 5-hour usage limit."}}}',
     ]
     models = {"anthropic": "claude-sonnet-5", "kimi": "kimi/k2.8",
               "openrouter": "xiaomi/mimo-v2.6-pro"}
@@ -203,7 +206,8 @@ def test_403_failover_invariant(monkeypatch):
                         FakeResp(status, body, content_length), 200))
                     h.relay("POST", [first, dict(PREPARED[0])], run="")
                     failover = (upstream == "kimi" and status == 403 and content_length
-                                and len(body) <= 8192 and b"usage limit" in body.lower())
+                                and len(body) <= 8192
+                                and re.search(rb"(?i)reached your [^.\n]{0,40}usage limit", body) is not None)
                     cell = (upstream, status, body[:24], content_length)
                     assert ("failed_over_to" in recs[0]) == failover, cell
                     if not failover:

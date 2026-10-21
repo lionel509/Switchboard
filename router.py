@@ -82,7 +82,7 @@ def gemma_error_text(data):
         msg = e.get("message") or json.dumps(d)
     except (ValueError, AttributeError):
         msg = data.decode(errors="replace") if isinstance(data, bytes) else str(data)
-    return msg[:300]
+    return str(msg)[:300]
 
 
 def gemma_or_body(req):
@@ -1039,9 +1039,10 @@ def sanitize_native(body, prov, wire_model):
 # 429 rate limit / quota, 402 payment required, 529 overloaded. A 401/403 is a
 # credential problem and must NOT silently drain a different quota instead.
 # Kimi Code answers an exhausted plan with a 403 whose text says "usage limit"
-# (its error reference); sniff_403 below maps only that.
+# (its error reference: "You've reached your <period> usage limit"); sniff_403
+# below maps only that sentence.
 FAILOVER_STATUSES = frozenset((402, 429, 529))
-KIMI_QUOTA_403 = re.compile(r"usage limit", re.I)
+KIMI_QUOTA_403 = re.compile(r"reached your [^.\n]{0,40}usage limit", re.I)
 SNIFF_LIMIT = 8192
 
 
