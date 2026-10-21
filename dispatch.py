@@ -103,7 +103,7 @@ def tier_allowed(name, model, pol):
     if name == "plan":
         return True
     if name == "antigravity":
-        return (pol.get("data") or "any") == "any"
+        return router.data_level(pol.get("data")) == "any"
     return router.allowed(model, pol)
 
 

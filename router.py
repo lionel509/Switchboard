@@ -13,7 +13,7 @@ Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
 and is stripped on both third-party paths — it never leaves this machine toward
 OpenRouter or a vendor endpoint.
 """
-import base64, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
+import base64, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, unicodedata, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -136,6 +136,13 @@ ROUTER_MODEL = os.environ.get("CLAUDE_ROUTER_AUTO_ROUTER",
 # escalates. Defaults to Anthropic: free at the margin on a subscription.
 FALLBACK     = os.environ.get("CLAUDE_ROUTER_AUTO_FALLBACK",
                               CATALOG.get("fallback", "claude-sonnet-5"))
+# Asked FIRST on Auto's first turn: an ordered chain of OpenRouter decision
+# models (System One API, POST /api/alpha/decisions) answers a typed choice
+# over the candidate ids. Each is tried in turn; a string is a one-item chain.
+# "" or [] turns the step off and Auto goes straight to ROUTER_MODEL.
+DECISION_MODEL = os.environ.get("CLAUDE_ROUTER_AUTO_DECIDER",
+                                CATALOG.get("decision_model", ""))
+DECISION_PATH  = "/api/alpha/decisions"
 # Escalate above this many characters of serialised prompt (~4 chars/token).
 AUTO_ESCALATE_CHARS = int(os.environ.get("CLAUDE_ROUTER_AUTO_CHARS", "24000"))
 # Only this much of the task is shown to the router model — it needs the gist,
@@ -378,15 +385,8 @@ Task:
 Model id:"""
 
 
-def ask_router_model(task, cands=None):
-    """One cheap call to name the best model for this task. None on any failure."""
-    if cands is None:
-        cands = CANDIDATES
-    if not ROUTER_MODEL or not cands or not task:
-        return None
-    key = or_key()
-    if not key:
-        return None
+def cand_line(m):
+    """One candidate as the router prompts show it: id | cost | what it is good at."""
     def cost(m):
         if m.get("billing") == "subscription":
             return "[subscription]"
@@ -395,54 +395,34 @@ def ask_router_model(task, cands=None):
             return "[priced by whatever it selects]"
         return "$%s/$%s per 1M" % (p[0], p[1])
 
-    def line(m):
-        s = "%s | %s | %s" % (m["id"], cost(m), m.get("good_at", ""))
-        if m.get("specialties"):
-            s += " SPECIALTY: %s." % ", ".join(m["specialties"])
-        return s
+    s = "%s | %s | %s" % (m["id"], cost(m), m.get("good_at", ""))
+    if m.get("specialties"):
+        s += " SPECIALTY: %s." % ", ".join(m["specialties"])
+    return s
 
-    # Group and order the list rather than relying on a rule to convey price.
-    # Told only in prose, "pick the cheapest" loses to a mid-priced model whose
-    # description sounds apt; shown as an ordering, it holds.
-    subs = [m for m in cands if m.get("billing") == "subscription"]
-    paid = sorted([m for m in cands if m.get("billing") != "subscription"],
-                  key=lambda m: (m.get("price") or [0])[0] if
-                  (m.get("price") or [0])[0] >= 0 else 1e9)
-    parts = []
-    if subs:
-        parts.append("NO CASH COST (consume plan quota):\n"
-                     + "\n".join(line(m) for m in subs))
-    if paid:
-        parts.append("COST CASH (listed cheapest first):\n"
-                     + "\n".join(line(m) for m in paid))
-    listing = "\n\n".join(parts) if parts else "\n".join(line(m) for m in cands)
-    body = json.dumps({
-        # The cheap models worth using here are reasoning models, and a routing
-        # decision does not need reasoning. Left on, the whole max_tokens budget
-        # goes to thinking tokens and the reply comes back stop_reason=max_tokens
-        # with no text at all. OpenRouter's own {"reasoning": {"enabled": false}}
-        # is NOT honoured on this endpoint; the Anthropic-style field is.
-        "model": ROUTER_MODEL, "max_tokens": 200, "temperature": 0,
-        "thinking": {"type": "disabled"},
-        "provider": prefs_for(ROUTER_MODEL),
-        "messages": [{"role": "user", "content": ROUTER_PROMPT % (listing, task)}],
-    }).encode()
+
+def openrouter_post(path, body, key, headers=None):
+    """POST JSON to openrouter.ai. The parsed dict, or None on any failure."""
     try:
         conn = http.client.HTTPSConnection("openrouter.ai", timeout=20)
-        conn.request("POST", "/api/v1/messages", body=body, headers={
+        conn.request("POST", path, body=json.dumps(body).encode(), headers={
             "Authorization": "Bearer " + key, "Content-Type": "application/json",
-            "anthropic-version": "2023-06-01"})
+            **(headers or {})})
         payload = json.loads(conn.getresponse().read())
         conn.close()
     except Exception:
         return None
-    blocks = [b for b in payload.get("content", []) if isinstance(b, dict)]
-    text = " ".join(b.get("text") or b.get("thinking") or "" for b in blocks)
-    # Match, don't parse. The reply drifts in three ways depending on which
-    # provider throughput-sorting landed on: it drops the leading "~" of an alias
-    # roughly half the time, sometimes gives only the slug, and sometimes the
-    # display name. Longest id first so a short id cannot shadow a longer one.
-    # Thinking text is included for when the budget ran out before any text.
+    return payload if isinstance(payload, dict) else None
+
+
+def match_model(text, cands):
+    """The candidate a free-text reply names, or None.
+
+    Match, don't parse. The reply drifts in three ways depending on which
+    provider throughput-sorting landed on: it drops the leading "~" of an alias
+    roughly half the time, sometimes gives only the slug, and sometimes the
+    display name. Longest id first so a short id cannot shadow a longer one.
+    """
     flat = text.replace("~", "").lower()
     cands = sorted(cands, key=lambda x: -len(x["id"]))
     for m in cands:                                  # full id
@@ -457,6 +437,139 @@ def ask_router_model(task, cands=None):
         if len(name) > 4 and name in flat:
             return m["id"]
     return None
+
+
+DECISION_INSTRUCTIONS = (
+    "Pick the one model that should handle this task. Each option is a model "
+    "id with its cost and what it is good at. [subscription] options cost no "
+    "money but use a limited monthly quota and are the most reliable at "
+    "multi-step tool use. Priced options cost cash per token. Rules in order: "
+    "(1) a task squarely inside an option's SPECIALTY goes to that option even "
+    "over a [subscription] one; (2) real coding, multi-step tool use, debugging, "
+    "or anything where a wrong answer costs time goes to a [subscription] option; "
+    "(3) bulk mechanical work (renames, greps, reformatting) goes to the CHEAPEST "
+    "priced option that covers it, never an expensive one; (4) if a priced option "
+    "is right but none clearly fits, pick openrouter/auto when it is listed; "
+    "(5) pick none only if no option could do the work.")
+
+
+def decision_chain(v=None):
+    """The decision models to try, in order. A string is a one-item chain; "" or [] is off."""
+    if v is None:
+        v = DECISION_MODEL
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, (list, tuple)):
+        return []
+    return [m for m in v if isinstance(m, str) and m]
+
+
+def ask_decision_model(task, cands, key, model):
+    """Ask one decision model for a typed choice over cands. An id from cands, or None.
+
+    The decision API answers with an exact option key, so the reply needs no
+    fuzzy match. Every call is a requests.log row: it is cash, and
+    claude-router-stats totals it. Errors, refusals and non-candidate answers
+    return None and the chain moves on.
+    """
+    criteria = {m["id"]: cand_line(m) for m in cands}
+    criteria["none"] = "No listed model fits this task."
+    body = {"model": model, "provider": prefs_for(model),
+            "state": task,
+            "questions": {"model": {"type": "choice", "instructions": DECISION_INSTRUCTIONS,
+                                    "criteria": criteria}}}
+    rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": "openrouter",
+           "model_requested": model, "kind": "auto_decision"}
+    payload = openrouter_post(DECISION_PATH, body, key)
+    if payload is None:
+        rec.update(status=504, error="no response (timeout or transport error)")
+        log_request(rec)
+        return None
+    if "error" in payload:
+        err = payload["error"] if isinstance(payload["error"], dict) else {}
+        code = err.get("code")
+        rec.update(status=code if isinstance(code, int) else 502,
+                   error=str(err.get("message", ""))[:120])
+        log_request(rec)
+        return None
+    answers = payload.get("answers")
+    ans = answers.get("model") if isinstance(answers, dict) else None
+    ans = ans if isinstance(ans, dict) else {}
+    usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+    rec.update(status=200, model_used=payload.get("model"), choice=ans.get("choice"),
+               confidence=ans.get("confidence"), cost=usage.get("cost"),
+               **{"in": usage.get("input_tokens"), "out": usage.get("output_tokens")})
+    log_request(rec)
+    choice = ans.get("choice")
+    if not isinstance(choice, str) or not choice or choice == "none":
+        return None
+    if choice in criteria:
+        return choice
+    return match_model(choice, cands)
+
+
+def ask_router_model(task, cands=None):
+    """Name the best model for this task. None on any failure.
+
+    Asks each DECISION_MODEL in turn, then ROUTER_MODEL. Never returns an id outside cands.
+    """
+    if cands is None:
+        cands = CANDIDATES
+    if not cands or not task:
+        return None
+    key = or_key()
+    if not key:
+        return None
+    for model in decision_chain():
+        got = ask_decision_model(task, cands, key, model)
+        if got:
+            return got
+    if not ROUTER_MODEL:
+        return None
+
+    # Group and order the list rather than relying on a rule to convey price.
+    # Told only in prose, "pick the cheapest" loses to a mid-priced model whose
+    # description sounds apt; shown as an ordering, it holds.
+    subs = [m for m in cands if m.get("billing") == "subscription"]
+    paid = sorted([m for m in cands if m.get("billing") != "subscription"],
+                  key=lambda m: (m.get("price") or [0])[0] if
+                  (m.get("price") or [0])[0] >= 0 else 1e9)
+    parts = []
+    if subs:
+        parts.append("NO CASH COST (consume plan quota):\n"
+                     + "\n".join(cand_line(m) for m in subs))
+    if paid:
+        parts.append("COST CASH (listed cheapest first):\n"
+                     + "\n".join(cand_line(m) for m in paid))
+    listing = "\n\n".join(parts) if parts else "\n".join(cand_line(m) for m in cands)
+    body = {
+        # The cheap models worth using here are reasoning models, and a routing
+        # decision does not need reasoning. Left on, the whole max_tokens budget
+        # goes to thinking tokens and the reply comes back stop_reason=max_tokens
+        # with no text at all. OpenRouter's own {"reasoning": {"enabled": false}}
+        # is NOT honoured on this endpoint; the Anthropic-style field is.
+        "model": ROUTER_MODEL, "max_tokens": 200, "temperature": 0,
+        "thinking": {"type": "disabled"},
+        "provider": prefs_for(ROUTER_MODEL),
+        "messages": [{"role": "user", "content": ROUTER_PROMPT % (listing, task)}],
+    }
+    payload = openrouter_post("/api/v1/messages", body, key,
+                              {"anthropic-version": "2023-06-01"})
+    if payload is None:
+        return None
+    blocks = [b for b in payload.get("content", []) if isinstance(b, dict)]
+    # Thinking text is included for when the budget ran out before any text.
+    text = " ".join(b.get("text") or b.get("thinking") or "" for b in blocks)
+    return match_model(text, cands)
+
+
+def may_send_task(pol):
+    """False under a "claude" folder: the task text may not reach any router model.
+
+    allowed() still admits the Anthropic models there, so the candidate list is
+    not empty, and a router call would send the task to OpenRouter anyway.
+    """
+    return data_level((pol or {}).get("data")) != "claude"
 
 
 def resolve_auto(req, pol=None):
@@ -482,7 +595,12 @@ def resolve_auto(req, pol=None):
         cands = [m for m in CANDIDATES if allowed(m["id"], pol or {})
                  and (BY_ID.get(m["id"]) or m).get("auto", True)
                  and (PROVIDERS.get(m["id"].split("/")[0]) or {}).get("auto", True)]
-        chosen = ask_router_model(task_text(req), cands) or FALLBACK
+        if may_send_task(pol):
+            chosen = ask_router_model(task_text(req), cands) or FALLBACK
+        else:
+            # claude folder: the task never leaves the machine, so no router call.
+            # Anthropic-only pick instead, from the same list the router would get.
+            chosen = FALLBACK if allowed(FALLBACK, pol or {}) or not cands else cands[-1]["id"]
     with _auto_lock:
         _auto_pins[key] = chosen
         if len(_auto_pins) > 512:        # bounded; oldest insertions drop first
@@ -540,7 +658,12 @@ def resolve_family(req, fam, tier=None, pol=None):
         pinned = _auto_pins.get(key)
     # On failure take the family's top tier rather than its cheapest: the family
     # was chosen deliberately, so erring toward capable beats erring toward cheap.
-    chosen = pinned or ask_router_model(task_text(req), cands) or cands[-1]["id"]
+    if not may_send_task(pol):
+        # claude folder: no router call, so the task never leaves the machine.
+        # A pin set under an earlier looser folder must not be served here.
+        chosen = pinned if pinned and allowed(pinned, pol or {}) else cands[-1]["id"]
+    else:
+        chosen = pinned or ask_router_model(task_text(req), cands) or cands[-1]["id"]
     with _auto_lock:
         _auto_pins[key] = chosen
     return chosen
@@ -1148,17 +1271,23 @@ def data_level(v):
     allowed() and policy_for() both read data through here, so they cannot
     disagree. Empty means any; any other string is matched lowercased, and one
     that is neither "claude" nor "any" means zdr (as allowed() always read it).
-    A non-string (a hand-edited list, a number) fails closed as claude.
+    A non-string (a hand-edited list, a number, even 0 or []) fails closed as
+    claude, and so does any string starting with "claude" after strip+lower.
+    None or an empty string means any (absent).
     """
-    if not v:
+    if v is None:
         return "any"
     if not isinstance(v, str):
-        return "claude"
-    v = v.lower()
-    return v if v in ("claude", "any") else "zdr"
+        return "claude"                  # falsy non-strings too: 0, False, [] fail closed
+    v = "".join(c for c in unicodedata.normalize("NFKC", v) if unicodedata.category(c) != "Cf").strip().lower()
+    if not v:
+        return "any"
+    if v.startswith("claude"):
+        return "claude"                  # "claude ", "claude-only" fail closed too
+    return "any" if v == "any" else "zdr"
 
 
-CWD_RE = re.compile(r"Primary working directory:\s*([^\r\n\"\\]+)")
+CWD_RE = re.compile(r'Primary working directory:\s*((?:[^\r\n"\\]|\\u[0-9a-fA-F]{4}|\\/)+)')
 
 
 def cwd_of(body):
@@ -1166,7 +1295,14 @@ def cwd_of(body):
     if not body:
         return ""
     m = CWD_RE.search(body.decode("utf-8", "replace"))
-    return m.group(1).strip().rstrip("/") if m else ""
+    if not m:
+        return ""
+    s = m.group(1)
+    try:
+        s = json.loads('"' + s + '"')   # undo \uXXXX and \/ from a JSON body
+    except ValueError:
+        pass
+    return s.strip().rstrip("/")
 
 
 def policy_for(cwd):
@@ -1179,12 +1315,12 @@ def policy_for(cwd):
     pol = dict(POLICY.get("_default") or POLICY_DEFAULT)
     # APFS is case-insensitive: `cd private` reaches Private, and the cwd
     # arrives as typed. A missed row drops the data filter, not just effort (#40).
-    cwd = (cwd or "").lower()
+    cwd = unicodedata.normalize("NFC", cwd or "").lower()
     best, hits = None, []
     for path, p in POLICY.items():
         if path.startswith("_") or not isinstance(p, dict):
             continue
-        root = os.path.expanduser(path).rstrip("/").lower()
+        root = unicodedata.normalize("NFC", os.path.expanduser(path)).rstrip("/").lower()
         if cwd == root or cwd.startswith(root + "/"):
             if best is None or len(root) > len(best):
                 best, hits = root, [(path, p)]
