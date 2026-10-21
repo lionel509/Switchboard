@@ -834,3 +834,30 @@ def test_fleet_header_is_never_cut_mid_word(w):
     whole = set(full.split())
     for token in shown:
         assert token in whole or token == "\u2026", (w, rows[2][3:edge].rstrip())
+
+
+def test_footer_keeps_the_w_hint_at_80_columns():
+    # breaker round 1: at the 80x24 minimum the w (write CLAUDE.md block) hint was dropped
+    # the order draw() builds: navigation, the agent row's keys, then band/save/quit
+    hints = [("←→", "page"), ("↑↓", "move"), ("enter", "next model"),
+             ("w", "write CLAUDE.md"), ("b", "hide band"), ("s", "save all"), ("q", "quit")]
+    kept = tui.fit_hints(hints, 76)
+    assert ("w", "write CLAUDE.md") in kept
+    assert ("b", "hide band") in kept
+    assert ("q", "quit") not in kept
+
+
+def test_fleet_heading_keeps_the_w_hint_at_80_columns():
+    # the heading is cut from the right by whole segments; w must survive a 76-cell width
+    head = tui.fit_head(tui.FLEET_HEAD, 76)
+    assert "w write CLAUDE.md block" in head, head
+
+
+def test_inherit_agent_gets_the_main_models_chain():
+    # breaker/reviewer finding 2: `model: inherit` followed the main model, but the block said "fails instead"
+    c = fixture_cat()
+    block = tui.fleet_block(c, [("worker", "inherit")], "opus[1m]")
+    assert "none -- fails instead" not in block
+    assert "claude-opus-5-5" in block
+    lines = tui.band_lines(c, {}, [("worker", "inherit")], "opus[1m]", 0, width=76)
+    assert "(inherit)" not in "".join(t for line in lines for t, _ in line)

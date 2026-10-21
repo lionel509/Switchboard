@@ -175,6 +175,8 @@ def row_segs(kind, payload, cat, picks, keyed=False):
     if kind == "agent":
         name, model = payload
         segs = [(pad(name, 16), "id"), (pad(model or "n/a", 8), "tier")]
+        if model == "inherit":
+            return segs + [("follows the main model", "note")]
         chain = tier_chain(cat, model) if model else []
         if not chain:
             return segs + [("no chain", "note")]
@@ -493,6 +495,11 @@ def packet_at(heads, tail, live, frame):
     return frame % (len(tail) + 1), False
 
 
+def effective_model(model, main):
+    """`inherit` runs on the main session's model, so it takes the main model's tier."""
+    return _main_alias(main) if model == "inherit" else model
+
+
 def tier_of(cat, model):
     """An agent's alias is its tier; a catalog id uses its row's tier."""
     if model in ALIASES:
@@ -563,6 +570,7 @@ def band_lines(cat, live, agents, main, frame, width=None):
     list of (text, role) segments for putsegs(). With `width`, every line fits in it:
     chain labels shorten with an ellipsis, and the tree wraps onto more rows."""
     lines = []
+    agents = [(n, effective_model(m, main)) for n, m in agents]
     groups = chain_groups(cat)
     if not groups:
         lines.append([(BAND_NOTE if width is None else _clip(BAND_NOTE, width), "note")])
@@ -607,6 +615,9 @@ def band_lines(cat, live, agents, main, frame, width=None):
 
 
 HEAD_SEP = "  \u00b7  "
+# w goes first: fit_head drops whole segments from the right, and the rewrite key must survive 80 columns
+FLEET_HEAD = ("FLEET   w write CLAUDE.md block" + HEAD_SEP +
+              "enter = next model (haiku \u2192 sonnet \u2192 opus \u2192 fable)")
 
 
 def fit_head(text, width):
@@ -628,15 +639,18 @@ def fit_head(text, width):
         best = cand
     return best or ("\u2026" if width >= 1 else "")
 
+PINNED_HINTS = ("b", "w")
+
+
 def fit_hints(pairs, width):
     """The footer hints that fit in `width`. A hint is dropped whole, from the right;
-    the band hint (b) is never dropped."""
+    the band hint (b) and the agent row's rewrite hint (w) are never dropped."""
     kept = list(pairs)
 
     def cells(ps):
         return sum(len(k) + 1 + len(l) for k, l in ps) + 5 * max(0, len(ps) - 1)
     while cells(kept) > width:
-        idx = next((i for i in range(len(kept) - 1, -1, -1) if kept[i][0] != "b"), None)
+        idx = next((i for i in range(len(kept) - 1, -1, -1) if kept[i][0] not in PINNED_HINTS), None)
         if idx is None:
             break
         del kept[idx]
@@ -761,11 +775,11 @@ def next_alias(model):
 
 def fleet_block(cat, agents, main):
     """The marked CLAUDE.md block: one row per agent, its tier's chain, metered hops flagged.
-    `main` is accepted for the call sites; the table is about agents, not the main model."""
-    del main
+    An `inherit` agent shows the main model's chain. The table is about agents."""
     rows = ["| Agent | Model | Spawned by | Can spawn | Fallback chain |", "|---|---|---|---|---|"]
     for name, model in agents:
-        chain = tier_chain(cat, model) if model else []
+        eff = effective_model(model, main)
+        chain = tier_chain(cat, eff) if eff else []
         text = " → ".join(h + (" (metered)" if hop_metered(cat, h) else "") for h in chain)
         rows.append("| %s | %s | main session | no | %s |"
                     % (name, model or "n/a", text or "none -- fails instead"))
@@ -1026,7 +1040,7 @@ class UI(object):
         for name in self.keyuse:
             label = next((u.get("label") or name for u in self.cat.get("upstreams", []) if u["name"] == name), name)
             rows.append(("keyuse", ("key: " + label, name)))
-        rows += [("blank", ""), ("head", "FLEET   enter = next model (haiku \u2192 sonnet \u2192 opus \u2192 fable)  \u00b7  w write CLAUDE.md block")]
+        rows += [("blank", ""), ("head", FLEET_HEAD)]
         agents = getattr(self, "agents", [])
         for name, model in agents:
             rows.append(("agent", (name, model)))
