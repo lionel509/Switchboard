@@ -38,14 +38,16 @@ SURFACE  = [s for s in os.environ.get("CLAUDE_ROUTER_MODELS", "grok").split(",")
 # is picked by URL path, not model: point MODEL_PROXY_URL at one of
 #   http://127.0.0.1:8787/gemma/local/v1  -> llama-server (Gaming PC, via tunnel)
 #   http://127.0.0.1:8787/gemma/or/v1     -> OpenRouter, strict ZDR key,
-#                                            google/gemma-4-31b-it, $0.09/$0.34 per 1M
+#                                            google/gemma-4-31b-it, DeepInfra $0.135-$0.20 in /
+#                                            $0.40-$0.51 out per 1M (live list, 2026-10-21)
 # Competition Data may not leave his hardware (rules 2.4.b), so /local never fails
 # over to anything: if llama-server is down the request errors.
 GEMMA_LOCAL = os.environ.get("CLAUDE_ROUTER_GEMMA_LOCAL", "http://127.0.0.1:8000")
 GEMMA_OR_MODEL = "google/gemma-4-31b-it"
 
 
-# Pinned to DeepInfra ($0.09/$0.34 per 1M), re-pinned 2026-10-17 because Reka dropped
+# Pinned to DeepInfra (live endpoints 2026-10-21: $0.135-$0.20 in / $0.40-$0.51 out per 1M;
+# the old $0.09/$0.34 was not on the live list), re-pinned 2026-10-17 because Reka dropped
 # Gemma 4. No fallback, by Lionel's call: an outage fails the call instead of moving
 # to a pricier provider. zdr stays as a guard: if DeepInfra stops qualifying, calls fail
 # rather than reaching a provider that retains.
