@@ -549,6 +549,15 @@ def ask_router_model(task, cands=None):
     return match_model(text, cands)
 
 
+def may_send_task(pol):
+    """False under a "claude" folder: the task text may not reach any router model.
+
+    allowed() still admits the Anthropic models there, so the candidate list is
+    not empty, and a router call would send the task to OpenRouter anyway.
+    """
+    return data_level((pol or {}).get("data")) != "claude"
+
+
 def resolve_auto(req, pol=None):
     """Map the auto pseudo-model onto a real one. One-way: never downgrades.
 
@@ -572,7 +581,12 @@ def resolve_auto(req, pol=None):
         cands = [m for m in CANDIDATES if allowed(m["id"], pol or {})
                  and (BY_ID.get(m["id"]) or m).get("auto", True)
                  and (PROVIDERS.get(m["id"].split("/")[0]) or {}).get("auto", True)]
-        chosen = ask_router_model(task_text(req), cands) or FALLBACK
+        if may_send_task(pol):
+            chosen = ask_router_model(task_text(req), cands) or FALLBACK
+        else:
+            # claude folder: the task never leaves the machine, so no router call.
+            # Anthropic-only pick instead, from the same list the router would get.
+            chosen = FALLBACK if allowed(FALLBACK, pol or {}) or not cands else cands[-1]["id"]
     with _auto_lock:
         _auto_pins[key] = chosen
         if len(_auto_pins) > 512:        # bounded; oldest insertions drop first
@@ -630,7 +644,11 @@ def resolve_family(req, fam, tier=None, pol=None):
         pinned = _auto_pins.get(key)
     # On failure take the family's top tier rather than its cheapest: the family
     # was chosen deliberately, so erring toward capable beats erring toward cheap.
-    chosen = pinned or ask_router_model(task_text(req), cands) or cands[-1]["id"]
+    if not may_send_task(pol):
+        # claude folder: no router call, so the task never leaves the machine.
+        chosen = pinned or cands[-1]["id"]
+    else:
+        chosen = pinned or ask_router_model(task_text(req), cands) or cands[-1]["id"]
     with _auto_lock:
         _auto_pins[key] = chosen
     return chosen

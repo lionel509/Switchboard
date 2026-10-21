@@ -172,3 +172,33 @@ def test_invariant_result_is_always_in_cands(monkeypatch, tmp_path):
         net = setup_env(monkeypatch, tmp_path, net=Net(decisions=[dec], chats=[chat_reply(chat_text)]))
         got = r.ask_router_model("t", subset)
         assert got in ({None} | set(in_ids)), (reply, got, in_ids)
+
+
+# --- claude folders: the task never leaves the machine (breaker round 1, review finding 1) ---
+
+MARK = "PRIVATE-TASK-80 refactor the payroll ledger"
+
+
+def _claude_req():
+    return {"messages": [{"role": "user", "content": MARK}]}
+
+
+def test_claude_only_folder_task_never_sent_to_openrouter_decision(monkeypatch, tmp_path):
+    net = setup_env(monkeypatch, tmp_path, net=Net(
+        decisions=[decision_reply("~c/d-latest")], chats=[chat_reply("a/b")]))
+    pol = {"data": "claude"}
+    got = r.resolve_auto(_claude_req(), pol)
+    assert net.calls == []
+    assert not any(MARK in json.dumps(b) for _, b, _ in net.calls)
+    assert r.allowed(got, pol)
+
+
+def test_claude_only_family_task_never_sent_to_openrouter(monkeypatch, tmp_path):
+    net = setup_env(monkeypatch, tmp_path, net=Net(
+        decisions=[decision_reply("~c/d-latest")], chats=[chat_reply("a/b")]))
+    fam = next(m["family"] for m in r.CANDIDATES if m.get("family"))
+    pol = {"data": "claude"}
+    got = r.resolve_family(_claude_req(), fam, pol=pol)
+    assert net.calls == []
+    assert not any(MARK in json.dumps(b) for _, b, _ in net.calls)
+    assert r.allowed(got, pol)
