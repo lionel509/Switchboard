@@ -1779,7 +1779,7 @@ class Router(BaseHTTPRequestHandler):
                 rec.update(status=resp.status, failed_over_to=prepared[i + 1]["model"],
                            ms=int((time.time() - t0) * 1000))
                 log_request(rec)
-                if resp.status == 429:
+                if status == 429:            # the effective status: a quota 403 counts (#70)
                     mark_429(att["model"], resp)
                 maybe_fetch_quota(att["upstream"])
                 try:
