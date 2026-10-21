@@ -1538,6 +1538,7 @@ class Router(BaseHTTPRequestHandler):
                            "to try (switchboard run moves to its next tier)"
                            % ", ".join(p["model"] for p in prepared))
         host, model, upstream = att["host"], att["model"], att["upstream"]
+        path = att.get("path") or self.path
 
         streaming = resp.getheader("content-length") is None
         rec["status"], rec["stream"] = resp.status, streaming
