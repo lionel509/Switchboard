@@ -14,6 +14,7 @@ and is stripped on both third-party paths — it never leaves this machine towar
 OpenRouter or a vendor endpoint.
 """
 import base64, calendar, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
+from email.utils import parsedate_to_datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -1001,6 +1002,10 @@ def to_epoch(v):
                 t = float(s)
             else:
                 t = float(calendar.timegm(time.strptime(s[:19], "%Y-%m-%dT%H:%M:%S")))
+                m = re.search(r"([+-])(\d\d):?(\d\d)$", s[19:])
+                if m:  # a UTC offset: local time minus offset is the instant
+                    off = int(m.group(2)) * 3600 + int(m.group(3)) * 60
+                    t -= off if m.group(1) == "+" else -off
         else:
             return None
     except (ValueError, OverflowError):
@@ -1060,6 +1065,11 @@ def mark_429(model, resp, now=None):
         secs = int(ra.strip())
     else:
         secs = limit_setting("cooloff_minutes") * 60
+        try:  # RFC 9110 allows an HTTP-date
+            if isinstance(ra, str) and ra.strip():
+                secs = max(0, parsedate_to_datetime(ra.strip()).timestamp() - now)
+        except (TypeError, ValueError, OverflowError, IndexError):
+            pass
     with SKIP_LOCK:
         SKIP_UNTIL[model] = now + min(secs, 8 * 86400)
 
