@@ -14,6 +14,9 @@ __pycache__/
 # Runtime plan-quota files — written by the router (kimi) and the statusline (claude)
 *-limits.json
 
+# Which model is serving each tier, written by the router on a skip or failover (#56)
+live-upstreams.json*
+
 # Pinned start model — written by `route --primary`, read by the claude() wrapper
 start-model
 
