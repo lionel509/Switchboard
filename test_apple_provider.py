@@ -303,3 +303,53 @@ def test_switchboard_hides_local_providers_from_login():
     assert "apple" not in names and "apple-pcc" not in names
     if "kimi" in cat["providers"]:
         assert "kimi" in names
+
+
+def test_local_provider_refuses_a_model_id_outside_the_catalog():
+    # apple/pcc is not a catalog row: the bare suffix would reach Private Cloud
+    # Compute under the zdr provider, so it is refused before any request is made.
+    h = r.Router.__new__(r.Router)
+    h.path, h.headers = "/v1/messages", _headers(CLIENT_HEADERS)
+    for mid in ("apple/pcc", "apple-pcc/on-device", "apple/x"):
+        got = h.prepare(mid, json.dumps(dict(MSG, model=mid)).encode())
+        assert isinstance(got, str), mid
+
+
+def test_every_local_id_is_a_catalog_row_or_refused():
+    h = r.Router.__new__(r.Router)
+    h.path, h.headers = "/v1/messages", _headers(CLIENT_HEADERS)
+    for vendor, prov in r.PROVIDERS.items():
+        if prov.get("local") is not True:
+            continue
+        for suffix in ("on-device", "pcc", "x"):
+            mid = "%s/%s" % (vendor, suffix)
+            got = h.prepare(mid, json.dumps(dict(MSG, model=mid)).encode())
+            assert isinstance(got, dict if mid in r.BY_ID else str), mid
+
+
+def test_apple_pcc_on_a_zdr_folder_never_reaches_the_shim(tmp_path, monkeypatch):
+    seen = []
+
+    class Shim(BaseHTTPRequestHandler):
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length", 0))
+            seen.append(self.rfile.read(n))
+            payload = json.dumps(CANNED).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *a):
+            pass
+
+    shim = _serve(Shim)
+    _point_apple_at(monkeypatch, shim.server_address[1])
+    monkeypatch.setattr(r, "LOGFILE", str(tmp_path / "req.log"))
+    monkeypatch.setattr(r, "POLICY", {"data": "zdr"})
+    front = _serve(r.Router)
+    status, _ = _post(front.server_address[1], dict(MSG, model="apple/pcc"))
+    assert status != 200
+    assert seen == []
+    shim.shutdown(); front.shutdown()
