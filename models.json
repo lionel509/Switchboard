@@ -127,6 +127,7 @@
       "local": true,
       "auto": false,
       "zdr": true,
+      "timeout": 180,
       "_note": "Swift shim apple/run.sh on localhost; no key; 4K window; headless one-shot callers only"
     },
     "apple-pcc": {
@@ -134,6 +135,7 @@
       "host": "127.0.0.1:8788",
       "local": true,
       "auto": false,
+      "timeout": 180,
       "_note": "same shim; Apple's cloud, so no zdr; unsigned binary gets ModelManagerError 1046 -> 403"
     }
   },

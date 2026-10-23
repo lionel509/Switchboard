@@ -1498,12 +1498,14 @@ class Router(BaseHTTPRequestHandler):
         client's own credential and is not the router's to refresh.
         """
         for renewed in (False, True):
+            # A local shim gets its own, shorter read timeout (#98); cloud keeps 900 s.
+            timeout = (PROVIDERS.get(att.get("vendor")) or {}).get("timeout", 900)
             if att.get("local"):
                 if not is_loopback(att["host"]):
                     raise OSError("refusing plain http to non-loopback %r" % att["host"])
-                conn = http.client.HTTPConnection(att["host"], timeout=900)
+                conn = http.client.HTTPConnection(att["host"], timeout=timeout)
             else:
-                conn = http.client.HTTPSConnection(att["host"], timeout=900)
+                conn = http.client.HTTPSConnection(att["host"], timeout=timeout)
             conn.request(method, att["path"], body=att["body"],
                          headers=att["headers"])
             resp = conn.getresponse()
@@ -1571,6 +1573,11 @@ class Router(BaseHTTPRequestHandler):
                 # to a plan-billed route but never buy the same turn again per token.
                 # This branch used to continue unconditionally: $3.11 on 2026-09-16.
                 if last or metered(prepared[i + 1]["model"]):
+                    if att.get("local") and isinstance(e, TimeoutError):
+                        return self.fail(502, "upstream %s: local provider %s did not answer "
+                                         "within %s s (is apple/run.sh wedged?)"
+                                         % (att["host"], att["vendor"],
+                                            (PROVIDERS.get(att["vendor"]) or {}).get("timeout", 900)))
                     if att.get("local"):
                         return self.fail(502, "upstream %s: %s -- local provider %s is not "
                                          "running (start apple/run.sh)"
