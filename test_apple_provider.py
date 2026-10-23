@@ -403,3 +403,16 @@ def test_all_too_long_refusals_are_a_400(tmp_path, monkeypatch):
     status, body = _route_with_refusals(tmp_path, monkeypatch, {
         "zz1/a": r.TooLong("too big"), "zz2/b": r.TooLong("too big too")})
     assert status == 400 and body["error"]["type"] == "invalid_request_error"
+
+
+def test_local_provider_never_sends_a_key_file(tmp_path, monkeypatch):
+    # Even if a local provider declares a key_file, its content must never leave the router (#98).
+    keyfile = tmp_path / "apple.key"
+    keyfile.write_text("sk-local-x\n")
+    monkeypatch.setitem(r.PROVIDERS, "apple", dict(r.PROVIDERS["apple"], key_file=str(keyfile)))
+    h = r.Router.__new__(r.Router)
+    h.path, h.headers = "/v1/messages", _headers(CLIENT_HEADERS)
+    att = h.prepare("apple/on-device", json.dumps(MSG).encode())
+    assert isinstance(att, dict), att
+    assert not att["key"]
+    assert not any("sk-local-x" in str(v) for v in att["headers"].values())
