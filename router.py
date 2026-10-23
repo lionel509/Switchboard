@@ -629,7 +629,7 @@ def picker_rows():
     return rows
 
 
-LOOPBACK = re.compile(r"(localhost|127(?:\.\d{1,3}){3}|\[::1\])(:\d{1,5})?")
+LOOPBACK = re.compile(r"(localhost|127(?:\.[0-9]{1,3}){3}|\[::1\])(:[0-9]{1,5})?")
 
 
 def is_loopback(host):
