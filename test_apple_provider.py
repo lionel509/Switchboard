@@ -353,3 +353,26 @@ def test_apple_pcc_on_a_zdr_folder_never_reaches_the_shim(tmp_path, monkeypatch)
     assert status != 200
     assert seen == []
     shim.shutdown(); front.shutdown()
+
+
+def test_wedged_local_shim_answers_fast(tmp_path, monkeypatch):
+    # A shim that accepts TCP and never answers must not hold the client for the
+    # cloud read timeout: the local provider gets its own short one (#98).
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    s.listen(8)
+    port = s.getsockname()[1]
+    monkeypatch.setitem(r.PROVIDERS, "apple",
+                        dict(r.PROVIDERS["apple"], host="127.0.0.1:%d" % port, timeout=1))
+    monkeypatch.setattr(r, "LOGFILE", str(tmp_path / "req.log"))
+    monkeypatch.setattr(r, "POLICY", {})
+    front = _serve(r.Router)
+    t0 = time.time()
+    status, body = _post(front.server_address[1], MSG)
+    assert time.time() - t0 < 10
+    assert status == 502 and body["error"]["type"] == "api_error"
+    assert "did not answer" in body["error"]["message"]
+    recs = _ledger(str(tmp_path / "req.log"))
+    assert len(recs) == 1 and recs[0]["upstream"] == "apple"
+    s.close()
+    front.shutdown()
