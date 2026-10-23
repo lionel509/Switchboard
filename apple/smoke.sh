@@ -113,4 +113,12 @@ H=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "$BASE/health")
 [ "$H" = 200 ] || fail "(k) /health after negative Content-Length: $H"
 ok "(k) negative Content-Length -> 400/411, /health still 200"
 
+# (l) max_tokens is required and must be at least 1: a 0 or -1 cap labels a finished reply as cut off (#98)
+for mt in '"max_tokens":-1,' '"max_tokens":0,' ''; do
+  mk "$TMP/l.json" "{\"model\":\"apple/on-device\",${mt}\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+  S=$(post "$TMP/l.json" "$BASE/v1/messages" "$TMP/l.out")
+  [ "$S" = 400 ] || fail "(l) max_tokens case '$mt' status $S, want 400"
+done
+ok "(l) max_tokens -1, 0 or missing -> 400"
+
 echo "smoke: all checks passed"
