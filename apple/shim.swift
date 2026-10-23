@@ -194,14 +194,20 @@ enum Target: String {
     case pcc = "pcc"
 }
 
+// A prefixed id must carry its own backend: apple/pcc is not a model (#98).
+// A bare "on-device" or "pcc" is what the router sends after its prefix is stripped.
 func target(_ model: String) -> Target? {
-    var m = model
-    if m.hasPrefix("apple-pcc/") {
-        m = String(m.dropFirst("apple-pcc/".count))
-    } else if m.hasPrefix("apple/") {
-        m = String(m.dropFirst("apple/".count))
+    guard let slash = model.firstIndex(of: "/") else {
+        return Target(rawValue: model)
     }
-    return Target(rawValue: m)
+    let prefix = String(model[..<slash])
+    let suffix = String(model[model.index(after: slash)...])
+    switch (prefix, suffix) {
+    case ("apple", "on-device"), ("apple-pcc", "pcc"):
+        return Target(rawValue: suffix)
+    default:
+        return nil
+    }
 }
 
 // Anthropic content is a string or an array of blocks. Only text is accepted:
