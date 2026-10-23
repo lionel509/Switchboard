@@ -99,4 +99,12 @@ case "$S" in
   *) cat "$TMP/i.out"; echo; fail "(i) pcc status $S" ;;
 esac
 
+# (j) a full id carries its own prefix: apple/pcc and apple-pcc/on-device are not models (#98)
+for m in apple/pcc apple-pcc/on-device; do
+  mk "$TMP/j.json" "{\"model\":\"$m\",\"max_tokens\":50,\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}"
+  S=$(post "$TMP/j.json" "$BASE/v1/messages" "$TMP/j.out")
+  [ "$S" = 404 ] || fail "(j) $m status $S, want 404"
+done
+ok "(j) apple/pcc and apple-pcc/on-device -> 404"
+
 echo "smoke: all checks passed"
