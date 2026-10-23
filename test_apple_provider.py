@@ -376,3 +376,30 @@ def test_wedged_local_shim_answers_fast(tmp_path, monkeypatch):
     assert len(recs) == 1 and recs[0]["upstream"] == "apple"
     s.close()
     front.shutdown()
+
+
+def _route_with_refusals(tmp_path, monkeypatch, answers):
+    """Two failover candidates, each refused by prepare() with the given answer."""
+    monkeypatch.setattr(r, "attempts_for", lambda model, pol, plan_only=False: list(answers))
+    monkeypatch.setattr(r.Router, "prepare", lambda self, model, body: answers[model])
+    monkeypatch.setattr(r, "LOGFILE", str(tmp_path / "req.log"))
+    monkeypatch.setattr(r, "POLICY", {})
+    front = _serve(r.Router)
+    status, body = _post(front.server_address[1], {"model": "zz1/a", "max_tokens": 5,
+                                                   "messages": [{"role": "user", "content": "hi"}]})
+    front.shutdown()
+    return status, body
+
+
+def test_mixed_refusals_are_a_500_not_a_400(tmp_path, monkeypatch):
+    # One candidate is too big, the other has no key: a retry could fit, so 500 (#98).
+    status, body = _route_with_refusals(tmp_path, monkeypatch, {
+        "zz1/a": r.TooLong("too big"), "zz2/b": "no zz2 key at nowhere"})
+    assert status == 500 and body["error"]["type"] == "api_error"
+
+
+def test_all_too_long_refusals_are_a_400(tmp_path, monkeypatch):
+    # Every candidate is too big: no retry can help, so the client gets a 400 (#98).
+    status, body = _route_with_refusals(tmp_path, monkeypatch, {
+        "zz1/a": r.TooLong("too big"), "zz2/b": r.TooLong("too big too")})
+    assert status == 400 and body["error"]["type"] == "invalid_request_error"
