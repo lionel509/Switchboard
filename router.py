@@ -1403,6 +1403,10 @@ class Router(BaseHTTPRequestHandler):
             local = prov.get("local") is True
             if local and not is_loopback(prov.get("host", "")):
                 return "%s is marked local but its host %r is not loopback" % (vendor, prov.get("host"))
+            # A local shim gets only the ids the catalog names: a bare suffix it
+            # does not list (apple/pcc) would reach a different backend (#98).
+            if local and model not in BY_ID:
+                return "%s has no catalog row for %r" % (vendor, model)
             keyfile = prov.get("key_file", "")
             key = "" if local else read_key(keyfile)
             if key and expiring(key):
