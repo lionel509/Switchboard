@@ -257,9 +257,13 @@ func parse(_ obj: [String: Any]) throws -> Parsed {
                      message: "apple models are one-shot: send exactly one user message (got \(messages.count))")
     }
     let prompt = try textOf(messages[0]["content"], "the user message") ?? ""
+    guard let maxTokens = obj["max_tokens"] as? Int, maxTokens >= 1 else {
+        throw Refuse(status: 400, type: "invalid_request_error",
+                     message: "max_tokens is required and must be an integer of at least 1")
+    }
     return Parsed(system: system,
                   prompt: prompt,
-                  maxTokens: obj["max_tokens"] as? Int,
+                  maxTokens: maxTokens,
                   temperature: obj["temperature"] as? Double,
                   stream: obj["stream"] as? Bool ?? false)
 }
