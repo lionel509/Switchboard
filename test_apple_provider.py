@@ -82,7 +82,7 @@ def test_is_loopback_accepts_only_bare_loopback():
 def test_is_loopback_refuses_lookalikes():
     bad = ["127.0.0.1.evil.com", "localhost.evil.com", "evil.com", "10.0.0.1", "0.0.0.0",
            "192.168.1.2", "[::]", "127.0.0.1@evil.com", "user@localhost", "::1",
-           "127.0.0.1/x", ""]
+           "127.0.0.1/x", "", "127.0.0.\u0661", "127.\u0660.0.1"]  # Arabic-Indic digits
     for host in bad:
         for port in PORTS:
             assert not r.is_loopback(host + port), host + port
