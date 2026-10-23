@@ -538,6 +538,36 @@ already in the picker natively and would duplicate every entry.
 
 The cache is read **at startup**, so a newly surfaced model appears one launch later.
 
+## Apple Foundation Models
+
+Two `providers` entries, `apple` and `apple-pcc`, serve Apple's on-device model and Private
+Cloud Compute through a Swift shim on `127.0.0.1:8788` (`apple/shim.swift`). They are marked
+`"local": true`: no key, plain http, and only a loopback host is accepted.
+
+- `apple/on-device` runs on this Mac and is `zdr: true`, so `zdr` folders may use it.
+- `apple-pcc/pcc` is Apple's cloud and is not `zdr`. Until the binary is signed with Apple's
+  entitlement it answers 403 `permission_error` (ModelManagerError 1046).
+- Neither model is ever a failover target, and neither is in the picker or Auto.
+
+Start and stop the shim (on demand, nothing keeps it alive):
+
+```sh
+apple/run.sh                      # foreground; Ctrl-C stops it
+nohup apple/run.sh > ~/.local/share/claude-router/apple-shim.log 2>&1 &   # detached
+pkill -f build/apple-shim         # stop a detached one
+```
+
+The on-device window is **4,096 tokens** for instructions, prompt and reply together, so use it
+for headless one-shot calls only. Claude Code's default system prompt alone overflows it:
+
+```sh
+claude -p --model apple/on-device --tools "" --strict-mcp-config \
+  --system-prompt "Answer in one line." "Is a tomato a fruit?"
+```
+
+An over-window request is refused with a 400 that says how many tokens it was. Nothing is
+truncated. `apple/smoke.sh` checks the shim against this Mac's real models.
+
 ## Headless runs: switchboard run
 
 `switchboard run <role>` sends a prompt (stdin or `--prompt-file`) to a headless
