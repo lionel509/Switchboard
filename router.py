@@ -629,6 +629,18 @@ def picker_rows():
     return rows
 
 
+LOOPBACK = re.compile(r"(localhost|127(?:\.\d{1,3}){3}|\[::1\])(:\d{1,5})?")
+
+
+def is_loopback(host):
+    """True only for a bare loopback host[:port] -- no userinfo, no path, no lookalikes."""
+    return bool(LOOPBACK.fullmatch(host or ""))
+
+
+class TooLong(str):
+    """A context-guard refusal: the request itself is too big, so a retry cannot help."""
+
+
 def read_key(path):
     """A credential from a file, or None. Never logged, never cached."""
     try:
@@ -1348,15 +1360,21 @@ class Router(BaseHTTPRequestHandler):
         if (PROVIDERS.get(vendor) or {}).get("wire") == "openai":
             return self.openai_wire(attempts[0], body, requested)
         prepared, errors = [], []
+        long_only = True
         for cand in attempts:
             got = self.prepare(cand, body)
             if isinstance(got, str):
                 errors.append("%s: %s" % (cand, got))
+                long_only = long_only and isinstance(got, TooLong)
             else:
                 got["effort"] = effort
                 prepared.append(got)
         if not prepared:
-            return self.fail(500, "; ".join(errors) or "no usable upstream")
+            # Claude Code retries a 5xx with backoff; a request every attempt
+            # refuses as too big will never fit, so say so as a 400 (#98).
+            bad = bool(errors) and long_only
+            return self.fail(400 if bad else 500, "; ".join(errors) or "no usable upstream",
+                             "invalid_request_error" if bad else "api_error")
 
         self.relay("POST" if body else self.command, prepared,
                    requested=requested, run=run)
@@ -1371,6 +1389,7 @@ class Router(BaseHTTPRequestHandler):
         """
         target = upstream_for(model)
         vendor = key = None
+        local = False
         if body:
             try:
                 req = json.loads(body)
@@ -1381,11 +1400,14 @@ class Router(BaseHTTPRequestHandler):
         if target.startswith("direct:"):
             vendor = target.split(":", 1)[1]
             prov = PROVIDERS[vendor]
+            local = prov.get("local") is True
+            if local and not is_loopback(prov.get("host", "")):
+                return "%s is marked local but its host %r is not loopback" % (vendor, prov.get("host"))
             keyfile = prov.get("key_file", "")
-            key = read_key(keyfile)
+            key = "" if local else read_key(keyfile)
             if key and expiring(key):
                 key = renew_key(vendor, prov, key) or key
-            if not key:
+            if not key and not local:
                 return "no %s key at %s" % (vendor, keyfile or "<unset>")
             host = prov["host"]
             path = prov.get("path_prefix", "").rstrip("/") + self.path
@@ -1395,8 +1417,8 @@ class Router(BaseHTTPRequestHandler):
             limit = (BY_ID.get(model) or {}).get("context")
             approx = len(body) // 4                    # ~4 chars per token
             if limit and approx > limit:
-                return ("this conversation is ~%s tokens and %s holds %s"
-                        % ("{:,}".format(approx), model, "{:,}".format(limit)))
+                return TooLong("this conversation is ~%s tokens and %s holds %s"
+                               % ("{:,}".format(approx), model, "{:,}".format(limit)))
             target = vendor            # log each subscription as its own pool
         elif target == "openrouter":
             key = or_key(model)
@@ -1422,7 +1444,8 @@ class Router(BaseHTTPRequestHandler):
                           not (BY_ID.get(model) or {}).get("upstream") and
                           (BY_ID.get(model) or {}).get("zdr", True) is False,
                 "key_upstream": target == "openrouter" and
-                                (BY_ID.get(model) or {}).get("upstream")}
+                                (BY_ID.get(model) or {}).get("upstream"),
+                "local": local}
 
     def headers_passthrough(self):
         """Everything the client sent, minus hop-by-hop. Credential untouched."""
@@ -1451,8 +1474,9 @@ class Router(BaseHTTPRequestHandler):
             if k.lower() in ("authorization", "x-api-key", "anthropic-beta"):
                 del h[k]
         prefix = prov.get("auth_prefix", "")
-        h[prov.get("auth_header", "x-api-key")] = (
-            prefix + " " + key if prefix else key)
+        if key:                              # a local shim has no credential to send
+            h[prov.get("auth_header", "x-api-key")] = (
+                prefix + " " + key if prefix else key)
         if not any(k.lower() == "anthropic-version" for k in h):
             h["anthropic-version"] = "2023-06-01"
         return h
@@ -1470,7 +1494,12 @@ class Router(BaseHTTPRequestHandler):
         client's own credential and is not the router's to refresh.
         """
         for renewed in (False, True):
-            conn = http.client.HTTPSConnection(att["host"], timeout=900)
+            if att.get("local"):
+                if not is_loopback(att["host"]):
+                    raise OSError("refusing plain http to non-loopback %r" % att["host"])
+                conn = http.client.HTTPConnection(att["host"], timeout=900)
+            else:
+                conn = http.client.HTTPSConnection(att["host"], timeout=900)
             conn.request(method, att["path"], body=att["body"],
                          headers=att["headers"])
             resp = conn.getresponse()
@@ -1538,6 +1567,10 @@ class Router(BaseHTTPRequestHandler):
                 # to a plan-billed route but never buy the same turn again per token.
                 # This branch used to continue unconditionally: $3.11 on 2026-09-16.
                 if last or metered(prepared[i + 1]["model"]):
+                    if att.get("local"):
+                        return self.fail(502, "upstream %s: %s -- local provider %s is not "
+                                         "running (start apple/run.sh)"
+                                         % (att["host"], e, att["vendor"]))
                     return self.fail(502, "upstream %s: %s" % (att["host"], e))
                 continue
             body, quota, broken = sniff_403(att, resp)
@@ -1842,9 +1875,9 @@ class Router(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(payload)
 
-    def fail(self, code, msg):
+    def fail(self, code, msg, kind="api_error"):
         payload = json.dumps({"type": "error",
-                              "error": {"type": "api_error", "message": msg}}).encode()
+                              "error": {"type": kind, "message": msg}}).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(payload)))
@@ -1859,7 +1892,7 @@ if __name__ == "__main__":
     # Say it now rather than at first use: a missing key file is a 500 halfway
     # through a task, and the picker row gives no hint that it is inert.
     for _name, _p in sorted(PROVIDERS.items()):
-        if not read_key(_p.get("key_file", "")):
+        if not _p.get("local") and not read_key(_p.get("key_file", "")):
             sys.stderr.write("  ! %s has no key at %s — its models will fail "
                              "until that file exists (chmod 600)\n"
                              % (_name, _p.get("key_file") or "<unset>"))

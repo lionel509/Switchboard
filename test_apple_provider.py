@@ -1,5 +1,5 @@
 """Apple Foundation Models provider on a localhost shim (#98). Run: python3 -m pytest test_apple_provider.py"""
-import email, http.client, importlib.util, json, os, socket, threading
+import email, http.client, importlib.util, json, os, socket, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -198,9 +198,18 @@ def _post(port, body, auth=True):
     return resp.status, json.loads(data)
 
 
-def _ledger(path):
-    with open(path) as f:
-        return [json.loads(line) for line in f if line.strip()]
+def _ledger(path, n=1):
+    """The router writes its ledger line after the body, so wait for it rather than race it."""
+    deadline = time.time() + 5
+    while True:
+        try:
+            with open(path) as f:
+                recs = [json.loads(line) for line in f if line.strip()]
+        except OSError:
+            recs = []
+        if len(recs) >= n or time.time() > deadline:
+            return recs
+        time.sleep(0.02)
 
 
 def test_end_to_end_through_router(tmp_path, monkeypatch):
