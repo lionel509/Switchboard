@@ -107,4 +107,10 @@ for m in apple/pcc apple-pcc/on-device; do
 done
 ok "(j) apple/pcc and apple-pcc/on-device -> 404"
 
+# (k) a negative Content-Length is refused, and the shim keeps serving (#98)
+python3 -I -c 'import socket,sys; s=socket.create_connection(("127.0.0.1",int(sys.argv[1])),timeout=5); s.sendall(b"POST /v1/messages HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: -5\r\n\r\n{}"); line=s.recv(4096).split(b"\r\n")[0].decode(); assert line.split()[1] in ("400","411"), line; print("   " + line)' "$PORT" || fail "(k) negative Content-Length: no 400/411 (shim may have exited)"
+H=$(curl -s -m 2 -o /dev/null -w '%{http_code}' "$BASE/health")
+[ "$H" = 200 ] || fail "(k) /health after negative Content-Length: $H"
+ok "(k) negative Content-Length -> 400/411, /health still 200"
+
 echo "smoke: all checks passed"
