@@ -72,6 +72,9 @@ func frame(_ buf: Data) -> Frame {
         guard let cl = headers["content-length"], let n = Int(cl) else {
             return .reject(411, "invalid_request_error", "POST needs a Content-Length header")
         }
+        guard n >= 0 else {
+            return .reject(400, "invalid_request_error", "Content-Length must not be negative")
+        }
         if n > maxBody {
             return .reject(413, "request_too_large", "request body is over 1 MB")
         }
