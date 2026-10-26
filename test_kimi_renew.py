@@ -53,9 +53,18 @@ class FakeConn:
 
 class FakeHTTPS:
     """Stands in for http.client.HTTPSConnection. Only NEW is accepted."""
+    # urllib's HTTPSHandler reads these class attributes and calls set_debuglevel
+    # on 3.12+, before any request is sent, so the fake must carry them too
+    debuglevel = 0
+    _http_vsn = 11
+    _http_vsn_str = "HTTP/1.1"
+
     def __init__(self, host, timeout=None):
         self.host = host
         self._ok = False
+
+    def set_debuglevel(self, level):
+        self.debuglevel = level
 
     def request(self, method, path, body=None, headers=None):
         auth = (headers or {}).get("Authorization")
@@ -298,6 +307,8 @@ def test_no_secret_reaches_any_output(monkeypatch, env, capsys, scenario):
     out = h.relay("POST", [env.att()], run="")
     text = capsys.readouterr().err + json.dumps(recs, default=str) + repr(out)
     text += h.wfile.getvalue().decode("utf-8", "replace")
+    # the leak check is only meaningful if the refresh actually reached the fake server
+    assert env.state["hits"] >= 1, scenario
     for secret in (OLD, NEW, RT1, RT2, RT_LEAK):
         assert secret not in text, scenario
 
