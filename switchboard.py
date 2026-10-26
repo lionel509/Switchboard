@@ -730,10 +730,14 @@ def save_oauth(name, prov, tok):
         d = os.path.dirname(path)
         if d:
             os.makedirs(d, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Written whole then renamed: the router reads key_file on every request
+        # and must never see a half-written token.
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(blob)
-        os.chmod(path, 0o600)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
 
     # An OAuth bearer is not an API key: it goes in a different header. Applying
     # it here rather than asking the user to hand-edit models.json.
@@ -815,33 +819,71 @@ def oauth_login(name, prov):
     return None
 
 
-def oauth_refresh(name, prov):
-    """Renew the access token from the stored refresh token."""
+# Standard OAuth error codes (RFC 6749 5.2 and 4.1.2.1, RFC 6750 3.1, RFC 8628 3.5). A failed
+# refresh reports one of these or a fixed fallback, never the server's own text (#101).
+OAUTH_ERRORS = frozenset({
+    "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+    "unsupported_grant_type", "invalid_scope", "invalid_token", "access_denied",
+    "server_error", "temporarily_unavailable", "authorization_pending", "slow_down",
+    "expired_token"})
+
+
+def _is_token(v):
+    """The one test for a usable token value, stored or received: a non-blank str
+    of RFC 6749 VSCHARs (printable ASCII 0x20-0x7E, Appendix A.12/A.17)."""
+    return isinstance(v, str) and v.strip() != "" and all(" " <= c <= "~" for c in v)
+
+
+def oauth_refresh(name, prov, why=None):
+    """Renew the access token from the stored refresh token.
+
+    `why`, if given, is filled with {"dead": bool, "reason": str}. dead means the
+    grant itself is refused or missing, so only a re-login helps; otherwise the
+    failure may pass. The reason is built only from the HTTP status and fixed strings (OAUTH_ERRORS);
+    no text the server sent is ever copied into `why` or the printed lines.
+    """
+    why = {} if why is None else why
     oa = prov.get("oauth") or {}
     tf = os.path.expanduser(oa.get("token_file", "~/.config/%s-oauth.json" % name))
     try:
         with open(tf) as f:
             stored = json.load(f)
+        if not isinstance(stored, dict):
+            raise ValueError("token file is not a JSON object")
     except (OSError, ValueError):
+        why.update(dead=True, reason="no stored OAuth token at %s" % tf)
         print("no stored OAuth token at %s — run: switchboard login %s --oauth"
               % (tf, name), file=sys.stderr)
         return None
     rt = stored.get("refresh_token")
-    if not rt:
+    if not _is_token(rt):
+        why.update(dead=True, reason="stored token has no refresh_token")
         print("stored token has no refresh_token — run login --oauth again",
               file=sys.stderr)
         return None
     st, tok = oauth_post(oa, oa.get("token_path", "/api/oauth/token"),
                          {"client_id": oa["client_id"], "grant_type": "refresh_token",
                           "refresh_token": rt})
-    if st != 200 or not tok.get("access_token"):
-        print("✗ refresh failed (HTTP %s): %s"
-              % (st, tok.get("error_description") or tok.get("error") or tok),
-              file=sys.stderr)
+    if not isinstance(tok, dict):
+        tok = {}
+    if st != 200 or not _is_token(tok.get("access_token")):
+        # Built only from the status and fixed strings. No byte the server sent
+        # reaches the reason, so there is nothing to redact (#101 round 3).
+        err = tok.get("error")
+        if st is None:
+            reason = "OAuth host unreachable"
+        elif st == 200:
+            reason = "HTTP 200: no access_token in reply"
+        else:
+            reason = "HTTP %d: %s" % (st, err if isinstance(err, str)
+                                      and err in OAUTH_ERRORS else "unrecognised error")
+        why.update(dead=st in (400, 401, 403), reason=reason)
+        print("✗ refresh failed (%s)" % reason, file=sys.stderr)
         return None
     # Some servers omit refresh_token on renewal; keep the old one so the next
     # refresh still works.
-    tok.setdefault("refresh_token", rt)
+    if not _is_token(tok.get("refresh_token")):
+        tok["refresh_token"] = rt
     return tok
 
 

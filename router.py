@@ -13,7 +13,7 @@ Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
 and is stripped on both third-party paths — it never leaves this machine toward
 OpenRouter or a vendor endpoint.
 """
-import base64, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
+import base64, hashlib, http.client, json, os, re, shlex, shutil, subprocess, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -686,6 +686,37 @@ def _renew_lock(vendor):
         return _renew_locks.setdefault(vendor, threading.Lock())
 
 
+# vendor -> {"reason": str, "dead": bool, "mtime": int|None} for the last failed
+# renewal. A dead grant is not retried until the token file changes (a re-login
+# rewrites it), so requests stop hammering the OAuth host with a refused token.
+_renew_failed = {}
+
+
+def _token_mtime(vendor, prov):
+    tf = os.path.expanduser((prov.get("oauth") or {}).get(
+        "token_file", "~/.config/%s-oauth.json" % vendor))
+    try:
+        return os.stat(tf).st_mtime_ns
+    except OSError:
+        return None
+
+
+def relogin_cmd(vendor):
+    return "python3 %s login %s --oauth" % (
+        shlex.quote(os.path.join(os.path.dirname(os.path.abspath(__file__)), "switchboard.py")),
+        vendor)
+
+
+def auth_failure(vendor, prov):
+    """The recorded failure for `vendor`, or None. A dead one is cleared once the
+    token file has changed, which means someone has logged in again."""
+    f = _renew_failed.get(vendor)
+    if f and f["dead"] and f["mtime"] != _token_mtime(vendor, prov):
+        _renew_failed.pop(vendor, None)
+        return None
+    return f
+
+
 def expiring(key, margin=RENEW_MARGIN):
     """True if `key` is a JWT that is spent, or nearly.
 
@@ -724,6 +755,9 @@ def renew_key(vendor, prov, stale):
         current = read_key(prov.get("key_file", ""))
         if current and current != stale:
             return current
+        f = auth_failure(vendor, prov)
+        if f and f["dead"]:
+            return None                    # refused already; wait for a re-login
         try:
             here = os.path.dirname(os.path.abspath(__file__))
             if here not in sys.path:
@@ -731,15 +765,34 @@ def renew_key(vendor, prov, stale):
             from switchboard import oauth_refresh, save_oauth
         except Exception as e:
             sys.stderr.write("renew %s: switchboard unavailable (%s)\n" % (vendor, e))
+            _renew_failed[vendor] = {"reason": "switchboard unavailable", "dead": False,
+                                     "mtime": None}
             return None
+        why = {}
         try:
-            tok = oauth_refresh(vendor, prov)
-            if not tok:
-                return None                # reason already on stderr
+            tok = oauth_refresh(vendor, prov, why)
+        except Exception as e:
+            sys.stderr.write("renew %s: refresh raised %s\n" % (vendor, type(e).__name__))
+            _renew_failed[vendor] = {"reason": "refresh error: %s" % type(e).__name__,
+                                     "dead": False, "mtime": None}
+            return None
+        if not tok:
+            reason, dead = why.get("reason") or "refresh failed", bool(why.get("dead"))
+            _renew_failed[vendor] = {"reason": reason, "dead": dead,
+                                     "mtime": _token_mtime(vendor, prov)}
+            if dead:
+                sys.stderr.write("!! %s sign-in is dead (%s); its requests fail until "
+                                 "you run: ! %s\n" % (vendor, reason, relogin_cmd(vendor)))
+            return None                    # reason already on stderr
+        try:
             save_oauth(vendor, prov, tok)
         except Exception as e:
-            sys.stderr.write("renew %s: %s\n" % (vendor, e))
+            sys.stderr.write("renew %s: save raised %s\n" % (vendor, type(e).__name__))
+            _renew_failed[vendor] = {"reason": "could not save renewed token: %s"
+                                     % type(e).__name__,
+                                     "dead": False, "mtime": None}
             return None
+        _renew_failed.pop(vendor, None)
         sys.stderr.write("renewed %s access token\n" % vendor)
         return tok.get("access_token")
 
@@ -1479,6 +1532,11 @@ class Router(BaseHTTPRequestHandler):
             prov = PROVIDERS.get(att["vendor"]) or {}
             fresh = renew_key(att["vendor"], prov, att.get("key"))
             if not fresh:
+                if prov.get("oauth"):
+                    f = _renew_failed.get(att["vendor"]) or {"reason": "renewal unavailable",
+                                                             "dead": False}
+                    rec["auth_error"] = f["reason"]
+                    rec["auth_dead"] = f["dead"]
                 return conn, resp          # nothing better to answer with
             prefix = prov.get("auth_prefix", "")
             att["headers"][prov.get("auth_header", "x-api-key")] = (
@@ -1540,6 +1598,26 @@ class Router(BaseHTTPRequestHandler):
                 if last or metered(prepared[i + 1]["model"]):
                     return self.fail(502, "upstream %s: %s" % (att["host"], e))
                 continue
+            if resp.status == 401 and rec.get("auth_error"):
+                # The token could not be renewed. Answer the caller and stop: no later
+                # hop runs, cash or plan-billed. Kimi's raw 401 is not streamed.
+                v = att.get("vendor") or att["upstream"]
+                reason, dead = rec.pop("auth_error"), rec.pop("auth_dead", False)
+                rec.update(status=401, error=("auth dead: " if dead else "auth renew failed: ")
+                           + reason, ms=int((time.time() - t0) * 1000))
+                log_request(rec)
+                try:
+                    resp.read()
+                    conn.close()
+                except Exception:
+                    pass
+                if dead:
+                    return self.fail(403, "%s sign-in has expired and its refresh token was "
+                                     "refused (%s). Nothing was sent to another model. "
+                                     "Re-login in a terminal: ! %s"
+                                     % (v, reason, relogin_cmd(v)))
+                return self.fail(503, "%s access token expired and could not be renewed (%s). "
+                                 "Nothing was sent to another model; retry shortly." % (v, reason))
             body, quota, broken = sniff_403(att, resp)
             if broken:
                 rec.update(status=502, error="403 body unreadable",
