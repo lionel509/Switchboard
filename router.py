@@ -772,9 +772,9 @@ def renew_key(vendor, prov, stale):
         try:
             tok = oauth_refresh(vendor, prov, why)
         except Exception as e:
-            sys.stderr.write("renew %s: %s\n" % (vendor, e))
-            _renew_failed[vendor] = {"reason": "refresh error: %s" % e, "dead": False,
-                                     "mtime": None}
+            sys.stderr.write("renew %s: refresh raised %s\n" % (vendor, type(e).__name__))
+            _renew_failed[vendor] = {"reason": "refresh error: %s" % type(e).__name__,
+                                     "dead": False, "mtime": None}
             return None
         if not tok:
             reason, dead = why.get("reason") or "refresh failed", bool(why.get("dead"))

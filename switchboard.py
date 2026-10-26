@@ -819,12 +819,27 @@ def oauth_login(name, prov):
     return None
 
 
+# Standard OAuth error codes (RFC 6749 5.2 and 4.1.2.1, RFC 6750 3.1, RFC 8628 3.5). A failed
+# refresh reports one of these or a fixed fallback, never the server's own text (#101).
+OAUTH_ERRORS = frozenset({
+    "invalid_request", "invalid_client", "invalid_grant", "unauthorized_client",
+    "unsupported_grant_type", "invalid_scope", "invalid_token", "access_denied",
+    "server_error", "temporarily_unavailable", "authorization_pending", "slow_down",
+    "expired_token"})
+
+
+def _is_token(v):
+    """The one test for a usable token value, stored or received: a non-blank str."""
+    return isinstance(v, str) and v.strip() != ""
+
+
 def oauth_refresh(name, prov, why=None):
     """Renew the access token from the stored refresh token.
 
     `why`, if given, is filled with {"dead": bool, "reason": str}. dead means the
     grant itself is refused or missing, so only a re-login helps; otherwise the
-    failure may pass. Token values never go into `why` or the printed lines.
+    failure may pass. The reason is built only from the HTTP status and fixed strings (OAUTH_ERRORS);
+    no text the server sent is ever copied into `why` or the printed lines.
     """
     why = {} if why is None else why
     oa = prov.get("oauth") or {}
@@ -840,7 +855,7 @@ def oauth_refresh(name, prov, why=None):
               % (tf, name), file=sys.stderr)
         return None
     rt = stored.get("refresh_token")
-    if not rt:
+    if not _is_token(rt):
         why.update(dead=True, reason="stored token has no refresh_token")
         print("stored token has no refresh_token — run login --oauth again",
               file=sys.stderr)
@@ -848,21 +863,26 @@ def oauth_refresh(name, prov, why=None):
     st, tok = oauth_post(oa, oa.get("token_path", "/api/oauth/token"),
                          {"client_id": oa["client_id"], "grant_type": "refresh_token",
                           "refresh_token": rt})
-    if st != 200 or not tok.get("access_token"):
-        # Deliberately not the whole reply: a 200 without an access_token used to
-        # print the dict, refresh token included.
-        text = "HTTP %s: %s" % (st, tok.get("error_description") or tok.get("error")
-                                or "no access_token in reply")
-        for secret in (rt, stored.get("access_token")):
-            if secret:
-                text = text.replace(str(secret), "[redacted]")
-        reason = text[:200]
+    if not isinstance(tok, dict):
+        tok = {}
+    if st != 200 or not _is_token(tok.get("access_token")):
+        # Built only from the status and fixed strings. No byte the server sent
+        # reaches the reason, so there is nothing to redact (#101 round 3).
+        err = tok.get("error")
+        if st is None:
+            reason = "OAuth host unreachable"
+        elif st == 200:
+            reason = "HTTP 200: no access_token in reply"
+        else:
+            reason = "HTTP %d: %s" % (st, err if isinstance(err, str)
+                                      and err in OAUTH_ERRORS else "unrecognised error")
         why.update(dead=st in (400, 401, 403), reason=reason)
         print("✗ refresh failed (%s)" % reason, file=sys.stderr)
         return None
     # Some servers omit refresh_token on renewal; keep the old one so the next
     # refresh still works.
-    tok["refresh_token"] = tok.get("refresh_token") or rt
+    if not _is_token(tok.get("refresh_token")):
+        tok["refresh_token"] = rt
     return tok
 
 
