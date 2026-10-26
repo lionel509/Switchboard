@@ -832,6 +832,8 @@ def oauth_refresh(name, prov, why=None):
     try:
         with open(tf) as f:
             stored = json.load(f)
+        if not isinstance(stored, dict):
+            raise ValueError("token file is not a JSON object")
     except (OSError, ValueError):
         why.update(dead=True, reason="no stored OAuth token at %s" % tf)
         print("no stored OAuth token at %s — run: switchboard login %s --oauth"
@@ -849,14 +851,18 @@ def oauth_refresh(name, prov, why=None):
     if st != 200 or not tok.get("access_token"):
         # Deliberately not the whole reply: a 200 without an access_token used to
         # print the dict, refresh token included.
-        reason = ("HTTP %s: %s" % (st, tok.get("error_description") or tok.get("error")
-                                   or "no access_token in reply"))[:200]
+        text = "HTTP %s: %s" % (st, tok.get("error_description") or tok.get("error")
+                                or "no access_token in reply")
+        for secret in (rt, stored.get("access_token")):
+            if secret:
+                text = text.replace(str(secret), "[redacted]")
+        reason = text[:200]
         why.update(dead=st in (400, 401, 403), reason=reason)
         print("✗ refresh failed (%s)" % reason, file=sys.stderr)
         return None
     # Some servers omit refresh_token on renewal; keep the old one so the next
     # refresh still works.
-    tok.setdefault("refresh_token", rt)
+    tok["refresh_token"] = tok.get("refresh_token") or rt
     return tok
 
 

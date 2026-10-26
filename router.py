@@ -13,7 +13,7 @@ Nothing is stored. The claude.ai token is forwarded on the Anthropic path only,
 and is stripped on both third-party paths — it never leaves this machine toward
 OpenRouter or a vendor endpoint.
 """
-import base64, hashlib, http.client, json, os, re, shutil, subprocess, sys, threading, time, urllib.parse
+import base64, hashlib, http.client, json, os, re, shlex, shutil, subprocess, sys, threading, time, urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 PORT     = int(os.environ.get("CLAUDE_ROUTER_PORT", "8787"))
@@ -703,7 +703,8 @@ def _token_mtime(vendor, prov):
 
 def relogin_cmd(vendor):
     return "python3 %s login %s --oauth" % (
-        os.path.join(os.path.dirname(os.path.abspath(__file__)), "switchboard.py"), vendor)
+        shlex.quote(os.path.join(os.path.dirname(os.path.abspath(__file__)), "switchboard.py")),
+        vendor)
 
 
 def auth_failure(vendor, prov):
