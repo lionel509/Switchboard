@@ -730,10 +730,14 @@ def save_oauth(name, prov, tok):
         d = os.path.dirname(path)
         if d:
             os.makedirs(d, exist_ok=True)
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        # Written whole then renamed: the router reads key_file on every request
+        # and must never see a half-written token.
+        tmp = path + ".tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(blob)
-        os.chmod(path, 0o600)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
 
     # An OAuth bearer is not an API key: it goes in a different header. Applying
     # it here rather than asking the user to hand-edit models.json.
@@ -815,19 +819,27 @@ def oauth_login(name, prov):
     return None
 
 
-def oauth_refresh(name, prov):
-    """Renew the access token from the stored refresh token."""
+def oauth_refresh(name, prov, why=None):
+    """Renew the access token from the stored refresh token.
+
+    `why`, if given, is filled with {"dead": bool, "reason": str}. dead means the
+    grant itself is refused or missing, so only a re-login helps; otherwise the
+    failure may pass. Token values never go into `why` or the printed lines.
+    """
+    why = {} if why is None else why
     oa = prov.get("oauth") or {}
     tf = os.path.expanduser(oa.get("token_file", "~/.config/%s-oauth.json" % name))
     try:
         with open(tf) as f:
             stored = json.load(f)
     except (OSError, ValueError):
+        why.update(dead=True, reason="no stored OAuth token at %s" % tf)
         print("no stored OAuth token at %s — run: switchboard login %s --oauth"
               % (tf, name), file=sys.stderr)
         return None
     rt = stored.get("refresh_token")
     if not rt:
+        why.update(dead=True, reason="stored token has no refresh_token")
         print("stored token has no refresh_token — run login --oauth again",
               file=sys.stderr)
         return None
@@ -835,9 +847,12 @@ def oauth_refresh(name, prov):
                          {"client_id": oa["client_id"], "grant_type": "refresh_token",
                           "refresh_token": rt})
     if st != 200 or not tok.get("access_token"):
-        print("✗ refresh failed (HTTP %s): %s"
-              % (st, tok.get("error_description") or tok.get("error") or tok),
-              file=sys.stderr)
+        # Deliberately not the whole reply: a 200 without an access_token used to
+        # print the dict, refresh token included.
+        reason = ("HTTP %s: %s" % (st, tok.get("error_description") or tok.get("error")
+                                   or "no access_token in reply"))[:200]
+        why.update(dead=st in (400, 401, 403), reason=reason)
+        print("✗ refresh failed (%s)" % reason, file=sys.stderr)
         return None
     # Some servers omit refresh_token on renewal; keep the old one so the next
     # refresh still works.
