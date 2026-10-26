@@ -365,7 +365,7 @@ def rt_env(tmp_path, monkeypatch):
             reply, status = state["reply"], state["status"]
             if state["rotate"] and form.get("refresh_token", [None])[0] != state["accept_rt"]:
                 reply, status = {"error": "invalid_grant", "error_description": "spent"}, 400
-            elif status == 200 and state["rotate"] and isinstance(reply.get("refresh_token"), str):
+            elif status == 200 and state["rotate"] and reply.get("refresh_token"):
                 state["accept_rt"] = reply["refresh_token"]      # single-use rotation
             body = json.dumps(reply).encode()
             self.send_response(status)
