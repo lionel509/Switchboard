@@ -6,7 +6,8 @@ Hermetic: HOME is a tmp dir, the Kimi provider points at a fake OAuth server on
 127.0.0.1, and the API connection is a fake. No test reaches auth.kimi.com or
 the real ~/.config credential files.
 """
-import http.client, importlib.util, io, json, os, stat, sys, threading, time, types
+import http.client, importlib.util, io, json, os, shlex, stat, sys, threading, time, types
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
@@ -333,3 +334,121 @@ def test_save_oauth_is_atomic(env, monkeypatch):
     for p in (env.keyfile, env.tokenfile):
         assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
     assert env.keyfile.read_text() == NEW
+
+
+# Moved from the breaker's round-2 repros (#101 review 5650017142). ----------
+# rt_env serves a rotating refresh token and can echo a reply, unlike `env` above.
+
+@pytest.fixture
+def rt_env(tmp_path, monkeypatch):
+    for k in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "all_proxy"):
+        monkeypatch.delenv(k, raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(r, "_renew_failed", {})
+    monkeypatch.setattr(r.http.client, "HTTPSConnection", FakeHTTPS)
+    API_CALLS.clear()
+    # reply: the JSON the fake OAuth host returns for a refresh; status: its HTTP code
+    state = {"hits": 0, "status": 200, "reply": {"access_token": NEW, "refresh_token": RT2},
+             "sent_rts": [], "delay": 0.0, "rotate": True, "accept_rt": RT1}
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, fmt, *args):
+            pass
+
+        def do_POST(self):
+            n = int(self.headers.get("Content-Length") or 0)
+            form = urllib.parse.parse_qs(self.rfile.read(n).decode())
+            state["hits"] += 1
+            state["sent_rts"].append(form.get("refresh_token", [None])[0])
+            if state["delay"]:
+                time.sleep(state["delay"])
+            reply, status = state["reply"], state["status"]
+            if state["rotate"] and form.get("refresh_token", [None])[0] != state["accept_rt"]:
+                reply, status = {"error": "invalid_grant", "error_description": "spent"}, 400
+            elif status == 200 and state["rotate"] and isinstance(reply.get("refresh_token"), str):
+                state["accept_rt"] = reply["refresh_token"]      # single-use rotation
+            body = json.dumps(reply).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    keyfile = tmp_path / "kimi-key"
+    tokenfile = tmp_path / "kimi-oauth.json"
+    keyfile.write_text(OLD)
+    tokenfile.write_text(json.dumps({"access_token": OLD, "refresh_token": RT1,
+                                     "expires_in": 900, "obtained_at": 0}))
+    prov = {"host": "api.kimi.test", "key_file": str(keyfile),
+            "auth_header": "Authorization", "auth_prefix": "Bearer",
+            "oauth": {"host": "http://127.0.0.1:%d" % srv.server_address[1],
+                      "client_id": "test", "token_path": "/api/oauth/token",
+                      "token_file": str(tokenfile),
+                      "device_id_file": str(tmp_path / "devid")}}
+    monkeypatch.setitem(r.PROVIDERS, "kimi", prov)
+
+    def att(key=OLD):
+        return {"vendor": "kimi", "upstream": "kimi", "host": "api.kimi.test",
+                "path": "/coding/v1/messages", "body": b"{}", "model": "kimi/k2.8",
+                "headers": {"Authorization": "Bearer " + key}, "key": key}
+
+    e = types.SimpleNamespace(tmp=tmp_path, state=state, prov=prov, keyfile=keyfile,
+                              tokenfile=tokenfile, att=att)
+    yield e
+    srv.shutdown()
+
+
+# a refresh reply with refresh_token null (or "") overwrites the stored
+# grant. The code comment says the old refresh token is kept when the server omits
+# one, but setdefault() does not replace an explicit null or empty string.
+@pytest.mark.parametrize("bad", [None, ""])
+def test_null_refresh_token_in_reply_keeps_old(rt_env, bad):
+    rt_env.state["reply"] = {"access_token": NEW, "refresh_token": bad}
+    assert r.renew_key("kimi", rt_env.prov, OLD) == NEW          # first renewal: fine
+    # access token expired again; the next renewal should still reach the server
+    assert r.renew_key("kimi", rt_env.prov, NEW) == NEW, r._renew_failed
+    assert rt_env.state["hits"] == 2, "second renewal never reached the OAuth host"
+    assert rt_env.state["sent_rts"][-1] == RT1
+
+
+# the server's error text goes verbatim into the reason, which is printed to
+# stderr, cached, written to requests.log and returned to the client. A server that
+# echoes the rejected credential in error_description leaks it everywhere.
+def test_server_error_text_is_redacted(rt_env, monkeypatch, capsys):
+    rt_env.state["status"] = 400
+    rt_env.state["reply"] = {"error": "invalid_grant",
+                          "error_description": "refresh_token %s is revoked" % RT1}
+    recs = []
+    monkeypatch.setattr(r, "log_request", recs.append)
+    assert r.renew_key("kimi", rt_env.prov, OLD) is None
+    out = capsys.readouterr().err
+    cached = json.dumps(r._renew_failed)
+    logged = json.dumps(recs)
+    assert RT1 not in out, "refresh token printed to stderr: %r" % out
+    assert RT1 not in cached, "refresh token kept in _renew_failed"
+    assert RT1 not in logged
+    assert RT1 not in r._renew_failed["kimi"]["reason"]
+
+
+# a token file that is valid JSON but not an object (e.g. "[]" or "null")
+# makes oauth_refresh raise AttributeError, which renew_key files as transient. The
+# grant needs a re-login (same as a missing file, which is classed dead), so the
+# caller should get the re-login command, not "retry shortly".
+@pytest.mark.parametrize("content", ["[]", "null"])
+def test_malformed_token_file_is_dead(rt_env, content):
+    rt_env.tokenfile.write_text(content)
+    assert r.renew_key("kimi", rt_env.prov, OLD) is None
+    f = r._renew_failed.get("kimi") or {}
+    assert f.get("dead") is True, "malformed token file classed as transient: %r" % f
+
+
+# relogin_cmd() prints the script path unquoted. A checkout under a folder
+# with a space gives a `!` command that the shell splits into the wrong arguments.
+def test_relogin_command_quotes_path(rt_env, monkeypatch, tmp_path):
+    spaced = tmp_path / "My Projects" / "router.py"
+    monkeypatch.setattr(r, "__file__", str(spaced))
+    cmd = r.relogin_cmd("kimi")
+    parts = shlex.split(cmd)
+    assert parts[1] == str(tmp_path / "My Projects" / "switchboard.py"), parts
