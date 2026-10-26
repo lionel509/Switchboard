@@ -829,8 +829,9 @@ OAUTH_ERRORS = frozenset({
 
 
 def _is_token(v):
-    """The one test for a usable token value, stored or received: a non-blank str."""
-    return isinstance(v, str) and v.strip() != ""
+    """The one test for a usable token value, stored or received: a non-blank str
+    of RFC 6749 VSCHARs (printable ASCII 0x20-0x7E, Appendix A.12/A.17)."""
+    return isinstance(v, str) and v.strip() != "" and all(" " <= c <= "~" for c in v)
 
 
 def oauth_refresh(name, prov, why=None):

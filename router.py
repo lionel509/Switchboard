@@ -787,8 +787,9 @@ def renew_key(vendor, prov, stale):
         try:
             save_oauth(vendor, prov, tok)
         except Exception as e:
-            sys.stderr.write("renew %s: %s\n" % (vendor, e))
-            _renew_failed[vendor] = {"reason": "could not save renewed token: %s" % e,
+            sys.stderr.write("renew %s: save raised %s\n" % (vendor, type(e).__name__))
+            _renew_failed[vendor] = {"reason": "could not save renewed token: %s"
+                                     % type(e).__name__,
                                      "dead": False, "mtime": None}
             return None
         _renew_failed.pop(vendor, None)
