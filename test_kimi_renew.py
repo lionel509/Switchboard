@@ -452,3 +452,18 @@ def test_relogin_command_quotes_path(rt_env, monkeypatch, tmp_path):
     cmd = r.relogin_cmd("kimi")
     parts = shlex.split(cmd)
     assert parts[1] == str(tmp_path / "My Projects" / "switchboard.py"), parts
+
+
+# a refresh that raises reports only the exception's type, never its text
+def test_refresh_exception_reason_is_type_only(rt_env, monkeypatch, capsys):
+    sys.path.insert(0, HERE)
+    import switchboard as sbm
+
+    def boom(*a, **k):
+        raise RuntimeError("echo %s" % RT1)
+
+    monkeypatch.setattr(sbm, "oauth_refresh", boom)
+    assert r.renew_key("kimi", rt_env.prov, OLD) is None
+    assert r._renew_failed["kimi"] == {"reason": "refresh error: RuntimeError",
+                                       "dead": False, "mtime": None}
+    assert RT1 not in capsys.readouterr().err
