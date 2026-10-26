@@ -125,7 +125,9 @@ def test_known_error_code_is_reported(fake):
 # ---- (b) invariant: one validity rule for stored and received tokens ----
 CANDIDATES = [("rt-ok-1", True), (" rt-ok-2 ", True), ("", False), ("   ", False),
               ("\n\t ", False), (None, False), (0, False), (5, False), (True, False),
-              ([], False), ({}, False), (["rt"], False)]
+              ([], False), ({}, False), (["rt"], False),
+              ("\ud800", False), ("rt-\ud800", False), ("\u200b", False),
+              ("\ufeff", False), ("\u2060", False), ("tok-\u00e9", False)]
 CIDS = [repr(v) for v, _ in CANDIDATES]
 
 

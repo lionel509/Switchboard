@@ -467,3 +467,20 @@ def test_refresh_exception_reason_is_type_only(rt_env, monkeypatch, capsys):
     assert r._renew_failed["kimi"] == {"reason": "refresh error: RuntimeError",
                                        "dead": False, "mtime": None}
     assert RT1 not in capsys.readouterr().err
+
+
+def test_save_failure_reason_is_type_only(rt_env, monkeypatch, capsys):
+    sys.path.insert(0, HERE)
+    import switchboard as sbm
+
+    monkeypatch.setattr(sbm, "oauth_refresh",
+                        lambda *a, **k: {"access_token": "sk-new-ok", "refresh_token": RT1})
+
+    def boom(*a, **k):
+        raise RuntimeError("echo %s" % RT1)
+
+    monkeypatch.setattr(sbm, "save_oauth", boom)
+    assert r.renew_key("kimi", rt_env.prov, OLD) is None
+    assert r._renew_failed["kimi"] == {"reason": "could not save renewed token: RuntimeError",
+                                       "dead": False, "mtime": None}
+    assert RT1 not in capsys.readouterr().err
