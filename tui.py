@@ -1003,7 +1003,7 @@ class UI(object):
 
     def keyed(self, name):
         p = self.cat["providers"][name]
-        return bool(self.sb.read_keyfile(p.get("key_file", "")))
+        return bool(p.get("local")) or bool(self.sb.read_keyfile(p.get("key_file", "")))
 
     def rebuild(self):
         self._drawn_top = None           # rows may have shifted: repaint in full next draw

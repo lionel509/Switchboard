@@ -86,7 +86,11 @@ def cmd_list(args):
     print("fallback     : %s" % cat.get("fallback", "(none)"))
     for name, p in sorted(cat.get("providers", {}).items()):
         kf = p.get("key_file", "")
-        mark = "✓" if read_keyfile(kf) else "✗ no key — run: switchboard login " + name
+        if p.get("local"):
+            mark = "local, no key (start apple/run.sh)"
+            kf = kf or "-"
+        else:
+            mark = "✓" if read_keyfile(kf) else "✗ no key — run: switchboard login " + name
         print("subscription : %s -> %s%s  (key: %s %s)"
               % (name, p.get("host", "?"), p.get("path_prefix", ""), kf or "?", mark))
     print()
@@ -461,6 +465,8 @@ def provider_rows(cat):
     """Every declared provider with whether its key is actually stored."""
     rows = []
     for name, p in sorted(cat.get("providers", {}).items()):
+        if p.get("local"):                 # a localhost shim has no key to store (#98)
+            continue
         rows.append((name, p, bool(read_keyfile(p.get("key_file", "")))))
     return rows
 

@@ -120,6 +120,23 @@
       "chat_path": "/openapi/chat/completions",
       "console_url": "https://www.kaggle.com/benchmarks",
       "_note": "Kaggle Benchmarks' Model Proxy: $10/day, $100/month of Kaggle credit (Lionel's account, 2026-09-28). OpenAI chat completions only, so the router translates (to_chat/from_chat/message_sse) and replays the reply as SSE; it does not stream. The token lasts 1 hour and is re-minted with the Kaggle CLI. A local token reaches only 8 models, and Gemma 4 is not one of them. No zdr:true, so zdr and claude folders are refused; auto:false keeps Auto off it; no model lists it in failover. Kaggle frames local tokens as for developing benchmark tasks: using them for general sessions was Lionel's call (Switchboard #15)."
+    },
+    "apple": {
+      "label": "Apple on-device",
+      "host": "127.0.0.1:8788",
+      "local": true,
+      "auto": false,
+      "zdr": true,
+      "timeout": 180,
+      "_note": "Swift shim apple/run.sh on localhost; no key; 4K window; headless one-shot callers only"
+    },
+    "apple-pcc": {
+      "label": "Apple Private Cloud Compute",
+      "host": "127.0.0.1:8788",
+      "local": true,
+      "auto": false,
+      "timeout": 180,
+      "_note": "same shim; Apple's cloud, so no zdr; unsigned binary gets ModelManagerError 1046 -> 403"
     }
   },
   "family_labels": {
@@ -131,7 +148,9 @@
     "glm": "Z.ai GLM",
     "mimo": "Xiaomi MiMo",
     "gemma": "Google Gemma",
-    "kaggle": "Kaggle credit"
+    "kaggle": "Kaggle credit",
+    "apple": "Apple on-device",
+    "apple-pcc": "Apple Private Cloud"
   },
   "_picker_note": "Gateway rows are published after the six built-in Claude rows. Order this list by how often each is picked by hand — Auto is always first. openrouter/auto is deliberately NOT listed: it is a delegation target for Auto (rule 4), not a hand-pick. Picking it directly can never select a subscription model, so every turn costs cash — the inverse of what Auto is for. Launch with --model openrouter/auto if it is ever wanted explicitly.",
   "picker": {
@@ -574,6 +593,36 @@
       "upstream": "openrouter-gemma",
       "zdr": false,
       "_zdr_note": "zdr:false until the Gemma4Challenge workspace's guardrail is confirmed, so the folder policy keeps it out of zdr folders (State Street)."
+    },
+    {
+      "id": "apple/on-device",
+      "name": "Apple on-device (Foundation Models)",
+      "family": "apple",
+      "tier": "flash",
+      "billing": "subscription",
+      "price": [
+        0,
+        0
+      ],
+      "context": 4096,
+      "failover": [],
+      "blurb": "Apple on-device · $0, never leaves the Mac",
+      "good_at": "headless one-shot classify/extract under 4K tokens; never auto-routed, never a failover target."
+    },
+    {
+      "id": "apple-pcc/pcc",
+      "name": "Apple Private Cloud Compute (Foundation Models)",
+      "family": "apple-pcc",
+      "tier": "flash",
+      "billing": "subscription",
+      "price": [
+        0,
+        0
+      ],
+      "context": 32768,
+      "failover": [],
+      "blurb": "Apple Private Cloud Compute · $0",
+      "good_at": "Apple's larger cloud model on the same shim; needs a signed app, never a failover target."
     },
     {
       "id": "kaggle/claude-sonnet-5",
