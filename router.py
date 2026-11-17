@@ -87,6 +87,14 @@ def gemma_error_text(data):
     return str(msg)[:300]
 
 
+def relay_route(path):
+    """'/kimi/v1/x' -> ('kimi', '/v1/x'); '/gemma/<route>/v1/x' -> ('<route>', '/v1/x')."""
+    if path.startswith("/kimi/"):
+        return "kimi", path[len("/kimi"):]
+    route, _, rest = path[len("/gemma/"):].partition("/")
+    return route, "/" + rest
+
+
 def gemma_or_body(req):
     """The harness request as sent to OpenRouter: the real model name, and the
     provider pinned in GEMMA_OR_PROVIDER, with no fallback. Providers of this
@@ -1344,7 +1352,7 @@ class Router(BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_POST(self):
-        if self.path.startswith("/gemma/"):
+        if self.path.startswith(("/gemma/", "/kimi/")):
             return self.gemma()
         self.route()
 
@@ -1775,8 +1783,8 @@ class Router(BaseHTTPRequestHandler):
         and, for /or, the model name. No policy, no failover: the path decides."""
         n = int(self.headers.get("content-length") or 0)
         body = self.rfile.read(n) if n else b""
-        route, _, rest = self.path[len("/gemma/"):].partition("/")
-        rest = "/" + rest
+        route, rest = relay_route(self.path)
+        model = "gemma-4-31b-it-qat-w4a16-ct"
         headers = {"Content-Type": "application/json"}
         if route == "local":
             u = urllib.parse.urlsplit(GEMMA_LOCAL)
@@ -1811,12 +1819,25 @@ class Router(BaseHTTPRequestHandler):
             host, tls = u.netloc, True
             path = u.path.rstrip("/") + "/openapi" + (rest[3:] if rest.startswith("/v1/") else rest)
             headers["Authorization"] = "Bearer " + got[1]
+        elif route == "kimi":                      # subscription only: no failover, never cash
+            prov = PROVIDERS["kimi"]
+            key = read_key(prov.get("key_file", ""))
+            if key and expiring(key):
+                key = renew_key("kimi", prov, key) or key
+            if not key:
+                return self.fail(401, "no Kimi token -- run: switchboard.py login kimi --oauth")
+            host, tls, path = prov["host"], True, prov.get("path_prefix", "") + rest
+            headers.update({"Authorization": "Bearer " + key, "User-Agent": "claude-code"})
+            try:
+                model = json.loads(body).get("model") or "?"
+            except (ValueError, AttributeError):
+                return self.fail(400, "body is not JSON")
         else:
-            return self.fail(404, "gemma route must be /gemma/local/..., /gemma/or/... or /gemma/kaggle/...")
+            return self.fail(404, "relay route must be /kimi/..., /gemma/local/..., /gemma/or/... or /gemma/kaggle/...")
 
         t0 = time.time()
-        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"), "upstream": "gemma-" + route,
-               "model_requested": "gemma-4-31b-it-qat-w4a16-ct"}
+        rec = {"ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+               "upstream": "kimi" if route == "kimi" else "gemma-" + route, "model_requested": model}
         try:
             conn = (http.client.HTTPSConnection if tls else http.client.HTTPConnection)(
                 host, timeout=900)
@@ -1839,7 +1860,7 @@ class Router(BaseHTTPRequestHandler):
             if u:
                 break
         if u:
-            rec.update(model_used={"or": GEMMA_OR_MODEL, "kaggle": GEMMA_KAGGLE_MODEL}.get(route, "llama-server"),
+            rec.update(model_used={"or": GEMMA_OR_MODEL, "kaggle": GEMMA_KAGGLE_MODEL, "kimi": model}.get(route, "llama-server"),
                        **{"in": u.get("prompt_tokens"), "out": u.get("completion_tokens")})
             if isinstance(u.get("cost"), dict):   # Kaggle: {"*_nanodollars": n} (#32)
                 rec["cost"] = sum(u["cost"].values()) / 1e9
