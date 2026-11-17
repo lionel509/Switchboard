@@ -1860,7 +1860,7 @@ class Router(BaseHTTPRequestHandler):
             if u:
                 break
         if u:
-            rec.update(model_used={"or": GEMMA_OR_MODEL, "kaggle": GEMMA_KAGGLE_MODEL}.get(route, "llama-server"),
+            rec.update(model_used={"or": GEMMA_OR_MODEL, "kaggle": GEMMA_KAGGLE_MODEL, "kimi": model}.get(route, "llama-server"),
                        **{"in": u.get("prompt_tokens"), "out": u.get("completion_tokens")})
             if isinstance(u.get("cost"), dict):   # Kaggle: {"*_nanodollars": n} (#32)
                 rec["cost"] = sum(u["cost"].values()) / 1e9
